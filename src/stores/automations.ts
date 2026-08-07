@@ -1,71 +1,101 @@
 import { defineStore } from 'pinia'
 import { ref } from 'vue'
 import { bus } from '@/core/bus/DeviceBus'
+import { useToast } from '@virgilvox/hackbuild-ui'
 import type { Artifact } from '@/core/types'
-
-export interface RuleClause {
-  kind: string
-  detail: string
-}
+import {
+  buildPerform,
+  triggerMatches,
+} from '@/core/automations/actions'
+import type {
+  ActionConfig,
+  ConditionConfig,
+  TriggerConfig,
+} from '@/core/automations/actions'
+import { useBench } from './bench'
 
 export interface Rule {
   id: string
   enabled: boolean
   fired: number
-  trigger: RuleClause & { deviceId?: string; match?: string }
-  condition: RuleClause & { minGapMs?: number }
-  action: RuleClause & { deviceId?: string }
   lastFiredAt: number
-  /** What the rule does when it fires. Rules built by a playbook carry one. */
-  perform?: () => Promise<void>
-  /** Set when the last action failed, so the row can say why. */
   lastError?: string
+  trigger: TriggerConfig
+  condition: ConditionConfig
+  action: ActionConfig
 }
 
-/** A rule as a builder hands it over, before it gets an id and its counters. */
-export type RuleDraft = Omit<Rule, 'id' | 'enabled' | 'fired' | 'lastFiredAt' | 'lastError'>
+export interface RuleLogEntry {
+  at: number
+  ruleId: string
+  message: string
+  level: 'fire' | 'error'
+}
+
+export type RuleDraft = Pick<Rule, 'trigger' | 'condition' | 'action'>
 
 /**
  * Trigger, condition, action rules over the device bus.
  *
- * A rule watches artifacts from one device and calls an action on another.
- * Rules run in this tab only, and stop when the tab closes.
+ * A rule watches artifacts and runs a real action when one matches: write to
+ * the log, notify, start recording, drive a pin on a board, or retune a radio.
+ * Rules run in this tab and stop when it closes.
  */
 export const useAutomations = defineStore('automations', () => {
   const rules = ref<Rule[]>([])
+  const log = ref<RuleLogEntry[]>([])
   let counter = 0
+
+  const { toast } = useToast()
+
+  const env = {
+    log: (message: string) => pushLog('', message, 'fire'),
+    notify: (message: string) => toast(message),
+    setRecording: (on: boolean) => {
+      const bench = useBench()
+      if (on !== bench.recording) bench.toggleRecording()
+    },
+  }
+
+  function pushLog(ruleId: string, message: string, level: 'fire' | 'error'): void {
+    log.value = [{ at: Date.now(), ruleId, message, level }, ...log.value].slice(0, 200)
+  }
 
   bus.onArtifact((a: Artifact) => {
     for (const rule of rules.value) {
       if (!rule.enabled) continue
-      if (rule.trigger.deviceId && rule.trigger.deviceId !== a.source) continue
-      if (!matches(rule, a)) continue
+      if (!triggerMatches(rule.trigger, a)) continue
 
-      const gap = rule.condition.minGapMs ?? 0
+      const gap = rule.condition.minGapMs
       if (gap && Date.now() - rule.lastFiredAt < gap) continue
 
       rule.lastFiredAt = Date.now()
       rule.fired++
-      if (rule.perform) {
-        void rule.perform().then(
-          () => {
-            rule.lastError = undefined
-          },
-          (err: unknown) => {
-            rule.lastError = err instanceof Error ? err.message : String(err)
-          },
-        )
-      }
+
+      const perform = buildPerform(rule.action, env)
+      void perform(a).then(
+        () => {
+          rule.lastError = undefined
+          pushLog(rule.id, describeFire(rule, a), 'fire')
+        },
+        (err: unknown) => {
+          rule.lastError = err instanceof Error ? err.message : String(err)
+          pushLog(rule.id, rule.lastError, 'error')
+        },
+      )
     }
   })
 
-  function matches(rule: Rule, a: Artifact): boolean {
-    const needle = rule.trigger.match
-    if (!needle) return true
-    if (a.kind === 'line') return a.text.includes(needle)
-    if (a.kind === 'packet') return (a.summary ?? '').includes(needle)
-    if (a.kind === 'transcript') return a.word.toLowerCase() === needle.toLowerCase()
-    return false
+  function describeFire(rule: Rule, a: Artifact): string {
+    const what =
+      a.kind === 'packet'
+        ? a.summary ?? a.proto
+        : a.kind === 'line'
+          ? a.text
+          : a.kind === 'transcript'
+            ? a.word
+            : a.kind
+    return `${rule.action.type} on "${what}"`
   }
 
   function addBlank(): void {
@@ -77,13 +107,9 @@ export const useAutomations = defineStore('automations', () => {
         enabled: false,
         fired: 0,
         lastFiredAt: 0,
-        trigger: {
-          kind: 'anything seen',
-          detail: first ? `on ${first.label}` : 'on any device',
-          deviceId: first?.id,
-        },
-        condition: { kind: 'rate limit', detail: 'once every 2 s', minGapMs: 2000 },
-        action: { kind: 'log it', detail: 'write a line to the session log' },
+        trigger: { type: 'any', deviceId: first?.id },
+        condition: { minGapMs: 2000 },
+        action: { type: 'log' },
       },
     ]
   }
@@ -93,9 +119,7 @@ export const useAutomations = defineStore('automations', () => {
     sourceId: string,
     match: string,
     actionDeviceId: string,
-    actionLabel: string,
   ): void {
-    const source = bus.node(sourceId)
     rules.value = [
       ...rules.value,
       {
@@ -103,23 +127,13 @@ export const useAutomations = defineStore('automations', () => {
         enabled: false,
         fired: 0,
         lastFiredAt: 0,
-        trigger: {
-          kind: 'this frame seen again',
-          detail: `${match} on ${source?.label ?? sourceId}`,
-          deviceId: sourceId,
-          match,
-        },
-        condition: { kind: 'rate limit', detail: 'once every 2 s', minGapMs: 2000 },
-        action: {
-          kind: 'drive a pin',
-          detail: `pulse a pin on ${actionLabel}`,
-          deviceId: actionDeviceId,
-        },
+        trigger: { type: 'packet', deviceId: sourceId, match },
+        condition: { minGapMs: 2000 },
+        action: { type: 'pin', deviceId: actionDeviceId, pin: 2, pinMode: 'pulse' },
       },
     ]
   }
 
-  /** Adds a rule a builder assembled. Off until the user switches it on. */
   function addRule(draft: RuleDraft): Rule {
     const rule: Rule = {
       id: `rule-${++counter}`,
@@ -132,6 +146,10 @@ export const useAutomations = defineStore('automations', () => {
     return rule
   }
 
+  function update(id: string, patch: Partial<Pick<Rule, 'trigger' | 'condition' | 'action'>>): void {
+    rules.value = rules.value.map((r) => (r.id === id ? { ...r, ...patch } : r))
+  }
+
   function toggle(id: string): void {
     const r = rules.value.find((x) => x.id === id)
     if (r) r.enabled = !r.enabled
@@ -141,5 +159,20 @@ export const useAutomations = defineStore('automations', () => {
     rules.value = rules.value.filter((r) => r.id !== id)
   }
 
-  return { rules, addBlank, addForArtifact, addRule, toggle, remove }
+  /** Fire a rule by hand, to check the action does what you expect. */
+  async function test(id: string): Promise<void> {
+    const rule = rules.value.find((r) => r.id === id)
+    if (!rule) return
+    const perform = buildPerform(rule.action, env)
+    try {
+      await perform({ kind: 'line', text: 'manual test', stream: 'note', source: '', t: 0, wall: Date.now(), seq: 0 })
+      rule.lastError = undefined
+      pushLog(rule.id, `tested ${rule.action.type}`, 'fire')
+    } catch (err) {
+      rule.lastError = err instanceof Error ? err.message : String(err)
+      pushLog(rule.id, rule.lastError, 'error')
+    }
+  }
+
+  return { rules, log, addBlank, addForArtifact, addRule, update, toggle, remove, test }
 })

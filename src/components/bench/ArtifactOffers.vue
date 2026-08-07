@@ -92,7 +92,7 @@ async function take(offer: Offer): Promise<void> {
   }
 
   if (offer.id.startsWith('trigger:') && offer.target) {
-    rules.addForArtifact(props.artifact.source, summaryOf(), offer.target.id, offer.target.label)
+    rules.addForArtifact(props.artifact.source, summaryOf(), offer.target.id)
     devices.focus('automations')
     return
   }

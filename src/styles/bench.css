@@ -2715,3 +2715,32 @@ canvas {
     transition: none;
   }
 }
+
+/* ---- automation rule cards ---------------------------------------------- */
+
+.bn-rulecard {
+  border: var(--hb-border) solid var(--hb-paper-edge);
+  background: var(--hb-paper-raised);
+  padding: 12px;
+  margin-bottom: 12px;
+}
+.bn-node .bn-nb select,
+.bn-node .bn-nb input {
+  width: 100%;
+  font-family: var(--hb-utility);
+  font-size: 11px;
+  border: var(--hb-border) solid var(--hb-ink);
+  padding: 4px 6px;
+  margin-top: 5px;
+  background: var(--hb-paper-raised);
+  color: var(--hb-ink);
+}
+.bn-node .bn-nb .bn-klabel {
+  font-family: var(--hb-utility);
+  font-size: 9px;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--hb-ink-3);
+  margin-top: 5px;
+  display: block;
+}

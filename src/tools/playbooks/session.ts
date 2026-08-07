@@ -20,7 +20,20 @@ export function playbookRunner(): PlaybookRunner {
   const hooks: PlaybookHooks = {
     sendToAnalysis: (label, bytes) => bench.sendToAnalysis(label, bytes),
     createRule: (rule) => {
-      automations.addRule(rule)
+      // translate the playbook's descriptive rule into the config model the
+      // automations engine executes. a pin action becomes a real pin drive.
+      const isPin = rule.action.deviceId !== undefined
+      automations.addRule({
+        trigger: {
+          type: rule.trigger.match ? 'packet' : 'any',
+          deviceId: rule.trigger.deviceId,
+          match: rule.trigger.match,
+        },
+        condition: { minGapMs: rule.condition.minGapMs ?? 3000 },
+        action: isPin
+          ? { type: 'pin', deviceId: rule.action.deviceId, pin: 2, pinMode: 'pulse' }
+          : { type: 'log' },
+      })
     },
   }
   runner = new PlaybookRunner(bus, hooks)
