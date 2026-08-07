@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, ref } from 'vue'
+import { computed, nextTick, onBeforeUnmount, ref, watch } from 'vue'
 import { HbButton, HbIcon } from '@virgilvox/hackbuild-ui'
 import type { IconName } from '@virgilvox/hackbuild-ui'
 import ArmDialog from '@/components/bench/ArmDialog.vue'
@@ -75,6 +75,17 @@ const lines = computed(() => {
   void version.value
   return runner.lines
 })
+
+const logPane = ref<HTMLElement | null>(null)
+
+watch(
+  () => lines.value.length,
+  () => {
+    void nextTick(() => {
+      if (logPane.value) logPane.value.scrollTop = logPane.value.scrollHeight
+    })
+  },
+)
 
 const finished = computed(() => {
   void version.value
@@ -307,7 +318,7 @@ function stepDisabled(s: StepStatus): boolean {
       </ol>
 
       <div class="bn-subhead" style="margin-top: 14px">log</div>
-      <div class="bn-term" style="height: 170px">
+      <div ref="logPane" class="bn-term" style="height: 170px">
         <div v-for="(l, i) in lines" :key="i">
           <span class="is-dim">{{ formatClock(l.at) }}</span>
           {{ ' ' + l.text }}

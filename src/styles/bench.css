@@ -672,6 +672,9 @@ canvas {
   flex-wrap: wrap;
 }
 .bn-seg2 button {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
   font-family: var(--hb-utility);
   font-size: 11px;
   font-weight: 600;
@@ -884,7 +887,10 @@ canvas {
   color: var(--hb-ink-3);
   word-break: break-all;
 }
+/* the badge takes its own row when the three columns above are full, so it is
+   pinned left rather than stretched across the width of the list. */
 .bn-trk {
+  justify-self: start;
   font-family: var(--hb-utility);
   font-size: 9px;
   letter-spacing: 0.06em;
@@ -2147,6 +2153,8 @@ canvas {
 }
 .bn-wslide input[type='range'] {
   width: 100%;
+  /* the ua margin on a range input would push the card past its column. */
+  margin: 0;
   accent-color: var(--hb-pink);
 }
 .bn-wscale {
@@ -2417,6 +2425,121 @@ canvas {
   }
 }
 
+/* ---- transmit studio ---------------------------------------------------- */
+
+.bn-drop {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--hb-s3);
+  border: var(--hb-border) dashed var(--hb-ink-4);
+  background: var(--hb-paper-sunk);
+  padding: var(--hb-s4);
+  margin: 10px 0;
+  font-family: var(--hb-utility);
+  font-size: 11px;
+  color: var(--hb-ink-3);
+}
+.bn-drop.is-over {
+  border-style: solid;
+  border-color: var(--hb-pink);
+  background: var(--bn-pink-paper);
+}
+.bn-drop input[type='file'] {
+  font-family: var(--hb-utility);
+  font-size: 11px;
+  max-width: 100%;
+}
+.bn-drop b {
+  font-family: var(--hb-readout);
+  font-size: 17px;
+  color: var(--hb-ink);
+  word-break: break-all;
+}
+
+.bn-txbar {
+  height: 14px;
+  border: var(--hb-border) solid var(--hb-ink);
+  background: var(--hb-paper-sunk);
+  margin: 10px 0;
+  overflow: hidden;
+}
+.bn-txbar i {
+  display: block;
+  height: 100%;
+  background: var(--hb-pink);
+}
+
+.bn-onair {
+  display: flex;
+  align-items: center;
+  gap: var(--hb-s3);
+  flex-wrap: wrap;
+  border: var(--hb-border) solid var(--hb-ink);
+  border-left: 6px solid var(--hb-pink);
+  background: var(--hb-ink);
+  color: var(--hb-paper);
+  padding: 10px 12px;
+  margin-bottom: 12px;
+  font-family: var(--hb-utility);
+  font-size: 12px;
+  line-height: 1.4;
+}
+.bn-onair .bn-v {
+  font-family: var(--hb-readout);
+  font-size: 20px;
+  color: var(--hb-slime);
+}
+.bn-onair .bn-grow {
+  flex: 1 1 220px;
+}
+.bn-onair .bn-txbar {
+  border-color: var(--hb-paper-edge);
+  background: var(--bn-ink-inset);
+  flex: 1 1 160px;
+  margin: 0;
+}
+
+.bn-bits {
+  font-family: var(--hb-readout);
+  font-size: 15px;
+  line-height: 1.35;
+  color: var(--hb-slime);
+  background: var(--hb-void);
+  border: var(--hb-border) solid var(--hb-ink);
+  padding: 8px 10px;
+  margin: 10px 0;
+  max-height: 132px;
+  overflow: auto;
+  word-break: break-all;
+}
+
+.bn-shot {
+  display: flex;
+  gap: var(--hb-s4);
+  flex-wrap: wrap;
+  align-items: flex-start;
+  margin: 10px 0;
+}
+.bn-shot img {
+  width: 240px;
+  max-width: 100%;
+  border: var(--hb-border) solid var(--hb-ink);
+  box-shadow: var(--hb-shadow);
+}
+.bn-shot .bn-k {
+  font-family: var(--hb-utility);
+  font-size: 9px;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--hb-ink-3);
+}
+.bn-shot .bn-v {
+  font-family: var(--hb-readout);
+  font-size: 18px;
+  color: var(--hb-ink);
+}
+
 /* touch targets get taller on coarse pointers so buttons are tappable. */
 @media (pointer: coarse) {
   .bn-subtab,
@@ -2467,5 +2590,128 @@ canvas {
   .bn-dot.is-live,
   .bn-surprise.is-rolling i {
     animation: none;
+  }
+}
+
+/* ---- rx decoders --------------------------------------------------------
+   The picture modes all put a canvas at its natural pixel size inside a frame
+   that scales it to the column. A wide frame, such as an apt line at 2080
+   words, can be switched to native size and scrolls inside itself.
+   ------------------------------------------------------------------------- */
+
+.bn-img {
+  position: relative;
+  background: var(--hb-void);
+  border: var(--hb-border) solid var(--hb-ink);
+  overflow: hidden;
+  max-width: 100%;
+}
+.bn-img canvas {
+  display: block;
+  width: 100%;
+  height: auto;
+  image-rendering: pixelated;
+}
+/* a 320 pixel frame blown up to a full desktop column is nine times native
+   and pushes everything else off screen. */
+.bn-img.is-capped {
+  max-width: 560px;
+}
+.bn-img.is-native {
+  overflow-x: auto;
+}
+.bn-img.is-native canvas {
+  width: auto;
+  max-width: none;
+}
+.bn-img .bn-imgtag {
+  position: absolute;
+  top: 0;
+  left: 0;
+  font-family: var(--hb-utility);
+  font-size: 9px;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--hb-slime);
+  background: var(--hb-ink);
+  padding: 2px 6px;
+  pointer-events: none;
+}
+
+.bn-imgrow {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(180px, 100%), 1fr));
+  gap: var(--hb-s2);
+  margin-top: var(--hb-s2);
+}
+
+.bn-prog {
+  height: 8px;
+  background: var(--hb-paper-sunk);
+  border: var(--hb-border) solid var(--hb-ink);
+  margin-top: var(--hb-s2);
+  overflow: hidden;
+}
+.bn-prog i {
+  display: block;
+  height: 100%;
+  background: var(--hb-pink);
+  transition: width var(--hb-t) linear;
+}
+
+.bn-hint {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--hb-s2);
+  border: var(--hb-border) dashed var(--hb-ink-4);
+  background: var(--hb-paper-sunk);
+  padding: var(--hb-s3);
+  margin-top: 12px;
+  font-family: var(--hb-body);
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--hb-ink-2);
+}
+.bn-hint i {
+  color: var(--hb-pink);
+  flex: 0 0 auto;
+  margin-top: 2px;
+}
+.bn-hint b {
+  font-family: var(--hb-utility);
+  font-size: 11px;
+  letter-spacing: 0.06em;
+  display: block;
+  color: var(--hb-ink);
+}
+
+.bn-field {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  min-width: 0;
+  flex: 1 1 120px;
+}
+.bn-field label {
+  font-family: var(--hb-utility);
+  font-size: 9px;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--hb-ink-3);
+}
+.bn-field input {
+  width: 100%;
+  min-width: 0;
+  font-family: var(--hb-readout);
+  font-size: 15px;
+  border: var(--hb-border) solid var(--hb-ink);
+  background: var(--hb-paper-raised);
+  color: var(--hb-ink);
+  padding: 3px 6px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .bn-prog i {
+    transition: none;
   }
 }

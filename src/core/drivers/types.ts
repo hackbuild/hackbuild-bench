@@ -54,6 +54,44 @@ export interface DeviceSession {
   health(): Promise<boolean>
 }
 
+/** Radio settings a transmission needs before it starts. */
+export interface TxParams {
+  centerHz?: number
+  sampleRate?: number
+  /** Transmit gain in dB. */
+  txvga?: number
+  /** Front end amplifier, 1 for on. */
+  amp?: number
+}
+
+export interface TransmitFrameOptions {
+  bitRate?: number
+  mode?: 'ook' | 'afsk'
+}
+
+/**
+ * The extra methods a session offers when its device provides transmit.rf.
+ *
+ * A panel asks the bus for the session and checks for these rather than for a
+ * device kind, so any radio that grows a transmit path gets the same tools.
+ * Every method throws when the capability is not armed.
+ */
+export interface TransmitSession extends DeviceSession {
+  setTxParams(params: TxParams): Promise<void>
+  /** Open the transmit path and hold it open until endTransmit. */
+  beginTransmit(): Promise<void>
+  /**
+   * Send interleaved baseband IQ. Resampled when the rate differs from the
+   * radio's. Returns once the samples are queued, blocking while the queue is
+   * full, so a caller in a loop paces itself against the air.
+   */
+  transmitIq(samples: Float32Array, sampleRate: number): Promise<void>
+  /** Send bytes as a keyed frame. Defaults to on off keying. */
+  transmitFrame(bytes: Uint8Array, opts?: TransmitFrameOptions): Promise<void>
+  endTransmit(): Promise<void>
+  isTransmitting(): boolean
+}
+
 export interface DeviceDriver {
   descriptor: DeviceDescriptor
 

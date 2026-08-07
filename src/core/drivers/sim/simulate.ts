@@ -4,7 +4,14 @@ import { CAPABILITIES } from '@/core/capabilities'
 import type { Capability } from '@/core/capabilities'
 import { SpectrumAnalyzer } from '@/core/dsp/fft'
 import type { DeviceDescriptor, ParamSpec } from '@/core/types'
-import type { DeviceDriver, DeviceHandle, DeviceSession, DriverContext } from '../types'
+import type {
+  DeviceDriver,
+  DeviceHandle,
+  DeviceSession,
+  DriverContext,
+  TransmitFrameOptions,
+  TxParams,
+} from '../types'
 import { boardProfile } from '../conduyt/profiles'
 
 /**
@@ -138,6 +145,7 @@ class SimulatedSession implements DeviceSession {
   private pinValues = new Map<number, number>()
   private simSubs = new Map<string, ReturnType<typeof setInterval>>()
   private hello: HelloResp | null = null
+  private txOn = false
 
   constructor(descriptor: DeviceDescriptor, ctx: DriverContext) {
     this.descriptor = descriptor
@@ -477,6 +485,58 @@ class SimulatedSession implements DeviceSession {
       throw new Error('arm rf transmit first, the button is in the bar above')
     }
     this.ctx.log(`simulated replay of ${bytes.length} bytes, nothing reached an antenna`)
+  }
+
+  // -- transmit --------------------------------------------------------------
+
+  private requireTx(): void {
+    if (!this.has(CAPABILITIES.TRANSMIT_RF)) {
+      throw new Error('this simulated device does not transmit')
+    }
+    if (!this.ctx.isArmed(CAPABILITIES.TRANSMIT_RF)) {
+      throw new Error('arm rf transmit first, the button is in the bar above')
+    }
+  }
+
+  async setTxParams(params: TxParams): Promise<void> {
+    this.requireTx()
+    if (params.centerHz !== undefined) this.params.centerHz = params.centerHz
+    if (params.sampleRate !== undefined) this.params.sampleRate = params.sampleRate
+    if (params.txvga !== undefined) this.params.txvga = params.txvga
+    if (params.amp !== undefined) this.params.amp = params.amp
+  }
+
+  async beginTransmit(): Promise<void> {
+    this.requireTx()
+    this.txOn = true
+    this.ctx.log(
+      `simulated transmit at ${((this.params.centerHz ?? 0) / 1e6).toFixed(3)} MHz, nothing reached an antenna`,
+    )
+  }
+
+  /** Paced against the clock so a panel's progress bar behaves like the radio. */
+  async transmitIq(samples: Float32Array, sampleRate: number): Promise<void> {
+    this.requireTx()
+    const seconds = samples.length / 2 / Math.max(1, sampleRate)
+    await new Promise((resolve) => setTimeout(resolve, Math.min(2000, seconds * 1000)))
+  }
+
+  async transmitFrame(bytes: Uint8Array, opts: TransmitFrameOptions = {}): Promise<void> {
+    this.requireTx()
+    const keying = opts.mode ?? 'ook'
+    const bitRate = opts.bitRate ?? 2000
+    this.ctx.log(
+      `simulated frame: ${bytes.length} bytes as ${keying} at ${bitRate}, nothing reached an antenna`,
+    )
+    await new Promise((resolve) => setTimeout(resolve, ((bytes.length * 8) / bitRate) * 1000))
+  }
+
+  async endTransmit(): Promise<void> {
+    this.txOn = false
+  }
+
+  isTransmitting(): boolean {
+    return this.txOn
   }
 
   // -- lifecycle -------------------------------------------------------------

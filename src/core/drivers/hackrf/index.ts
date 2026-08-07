@@ -17,10 +17,14 @@ import type {
   DeviceSession,
   DriverContext,
   StartMode,
+  TransmitFrameOptions,
+  TransmitSession,
+  TxParams,
 } from '@/core/drivers/types'
 import type { DemodMode } from '@/core/dsp/demod'
 import { ReceiveChain } from '@/core/dsp/demod'
 import { SpectrumAnalyzer } from '@/core/dsp/fft'
+import { afskModulate, bytesToBits, ookFrame, resampleIq } from '@/core/dsp/modulate'
 import { UsbPort } from '@/core/transport/webusb'
 import type {
   Artifact,
@@ -64,6 +68,12 @@ const EP_TX = 2
 /** 32768 complex samples per transfer, deep enough to hold 20 Msps. */
 const TRANSFER_BYTES = 65536
 const TRANSFER_DEPTH = 8
+/** Transmit transfers in flight. Fewer than this and the dac runs dry. */
+const TX_DEPTH = 4
+/** Queue ceiling. About a tenth of a second at 2 Msps, which bounds latency. */
+const TX_QUEUE_BYTES = TRANSFER_BYTES * 8
+/** A frame longer than this is refused rather than held in memory. */
+const TX_FRAME_LIMIT_SECONDS = 10
 const FFT_SIZE = 2048
 /** Publish spectrum at 20 fps whatever the sample rate feeds in. */
 const FFT_INTERVAL_MS = 50
@@ -116,7 +126,7 @@ export const hackrfDescriptor: DeviceDescriptor = {
   usbFilters: USB_FILTERS,
   limits: {
     [CAPABILITIES.TRANSMIT_RF]:
-      'transmit is a carrier at the tuned frequency. arm rf transmit first, and attach an antenna or a dummy load so the output is not driving an open port.',
+      'transmit puts baseband on the air at the tuned frequency, and receive stops while it runs. arm rf transmit first, and attach an antenna or a dummy load so the output is not driving an open port.',
   },
 }
 
@@ -132,7 +142,16 @@ function clamp(v: number, lo: number, hi: number): number {
   return Math.max(lo, Math.min(hi, v))
 }
 
-class HackRfSession implements DeviceSession {
+/**
+ * The hackrf session as a panel sees it. Beyond the adapter contract it takes
+ * baseband to put on the air, which is what the transmit studio drives.
+ */
+export interface HackRfSession extends TransmitSession {
+  /** The rate the transmit path runs at, which is the radio's sample rate. */
+  txSampleRate(): number
+}
+
+class HackRfOneSession implements HackRfSession {
   private usb: UsbPort
   private ctx: DriverContext
   private params: Record<string, number> = {
@@ -149,6 +168,14 @@ class HackRfSession implements DeviceSession {
   private chain = new ReceiveChain(AUDIO_RATE)
   private abort: AbortController | null = null
   private lastFftAt = 0
+
+  private txActive = false
+  private txAbort: AbortController | null = null
+  private txPump: Promise<void> | null = null
+  private txChunks: Array<Int8Array<ArrayBuffer>> = []
+  private txQueued = 0
+  private txRoom: Array<() => void> = []
+  private txIdle: Array<() => void> = []
 
   constructor(usb: UsbPort, ctx: DriverContext) {
     this.usb = usb
@@ -306,11 +333,12 @@ class HackRfSession implements DeviceSession {
     const [head, tail] = mode.split(':')
 
     if (head === 'tx') {
-      if (!this.ctx.isArmed(CAPABILITIES.TRANSMIT_RF)) {
-        throw new Error(
-          'transmit is not armed. arm rf transmit on this device, check the band is one you may transmit on, and attach an antenna or a dummy load before starting again.',
-        )
-      }
+      await this.beginTransmit()
+      this.ctx.log(
+        `carrier out at ${(this.params.centerHz / 1e6).toFixed(3)} MHz, tx gain ${Math.round(this.params.txvga)} dB`,
+      )
+      void this.carrierLoop()
+      return
     }
 
     await this.applyRadio(false)
@@ -335,22 +363,12 @@ class HackRfSession implements DeviceSession {
       return
     }
 
-    if (head === 'tx') {
-      await this.setTxVga(this.params.txvga)
-      this.applied.txvga = this.params.txvga
-      await this.setTransceiverMode(MODE.TRANSMIT)
-      this.ctx.log(
-        `transmitting a carrier at ${(this.params.centerHz / 1e6).toFixed(3)} MHz, tx gain ${Math.round(this.params.txvga)} dB`,
-      )
-      void this.transmitCarrier(abort.signal)
-      return
-    }
-
     this.abort = null
     throw new Error(`hackrf has no mode called ${mode}`)
   }
 
   async stop(): Promise<void> {
+    if (this.txActive) await this.endTransmit()
     if (!this.abort) return
     this.abort.abort()
     this.abort = null
@@ -449,23 +467,224 @@ class HackRfSession implements DeviceSession {
     this.ctx.emit(frame)
   }
 
+  // -------------------------------------------------------------------------
+  // transmit
+  // -------------------------------------------------------------------------
+
+  txSampleRate(): number {
+    return this.params.sampleRate
+  }
+
+  isTransmitting(): boolean {
+    return this.txActive
+  }
+
+  private requireTxArm(): void {
+    if (this.ctx.isArmed(CAPABILITIES.TRANSMIT_RF)) return
+    throw new Error(
+      'transmit is not armed. arm rf transmit on this device, check the band is one you may transmit on, and attach an antenna or a dummy load before sending.',
+    )
+  }
+
+  async setTxParams(params: TxParams): Promise<void> {
+    this.requireTxArm()
+    const next: Record<string, number> = {}
+    if (params.centerHz !== undefined) next.centerHz = clamp(params.centerHz, 1e6, 6000e6)
+    if (params.sampleRate !== undefined) {
+      next.sampleRate = clamp(params.sampleRate, 2000000, 20000000)
+    }
+    if (params.txvga !== undefined) next.txvga = clamp(params.txvga, 0, 47)
+    if (params.amp !== undefined) next.amp = params.amp >= 1 ? 1 : 0
+    this.params = { ...this.params, ...next }
+    await this.applyRadio(false)
+    if (next.txvga !== undefined) {
+      await this.setTxVga(this.params.txvga)
+      this.applied.txvga = this.params.txvga
+    }
+  }
+
+  /**
+   * Enter transmit. The radio is half duplex, so receive stops first and the
+   * spectrum and audio panels go quiet until endTransmit.
+   */
+  async beginTransmit(): Promise<void> {
+    this.requireTxArm()
+    if (this.txActive) return
+    await this.stop()
+    await this.applyRadio(false)
+    await this.setTxVga(this.params.txvga)
+    this.applied.txvga = this.params.txvga
+
+    const abort = new AbortController()
+    this.txAbort = abort
+    this.abort = abort
+    this.txActive = true
+    this.txChunks = []
+    this.txQueued = 0
+    await this.setTransceiverMode(MODE.TRANSMIT)
+    this.txPump = this.pumpTx(abort.signal)
+  }
+
+  async endTransmit(): Promise<void> {
+    if (!this.txActive) return
+    this.txActive = false
+    this.txChunks = []
+    this.txQueued = 0
+    this.wake(this.txRoom)
+    this.wake(this.txIdle)
+
+    const abort = this.txAbort
+    this.txAbort = null
+    abort?.abort()
+    if (this.abort === abort) this.abort = null
+
+    const pump = this.txPump
+    this.txPump = null
+    if (pump) await pump
+
+    try {
+      await this.setTransceiverMode(MODE.OFF)
+      // the amplifier goes off between transmissions. a send turns it back on.
+      await this.setAmp(false)
+      this.applied.amp = 0
+      this.params.amp = 0
+    } catch {
+      // nothing left to quiet down when the device is gone.
+    }
+  }
+
+  async transmitIq(samples: Float32Array, sampleRate: number): Promise<void> {
+    this.requireTxArm()
+    if (samples.length < 2) return
+
+    const opened = !this.txActive
+    if (opened) {
+      await this.beginTransmit()
+      const seconds = samples.length / 2 / Math.max(1, sampleRate)
+      this.ctx.log(
+        `${seconds.toFixed(2)} s of baseband out at ${(this.params.centerHz / 1e6).toFixed(3)} MHz, tx gain ${Math.round(this.params.txvga)} dB`,
+      )
+    }
+
+    const rate = this.params.sampleRate
+    const iq = sampleRate === rate ? samples : resampleIq(samples, sampleRate, rate)
+    await this.queue(this.toInt8(iq))
+
+    if (opened) {
+      await this.drainTx()
+      await this.endTransmit()
+    }
+  }
+
+  async transmitFrame(bytes: Uint8Array, opts: TransmitFrameOptions = {}): Promise<void> {
+    this.requireTxArm()
+    if (bytes.length === 0) throw new Error('the frame is empty, there is nothing to send.')
+
+    const rate = this.params.sampleRate
+    const keying = opts.mode ?? 'ook'
+    const bitRate = clamp(Math.round(opts.bitRate ?? 2000), 50, 200000)
+    const seconds = (bytes.length * 8 + 32) / bitRate
+    if (seconds > TX_FRAME_LIMIT_SECONDS) {
+      throw new Error(
+        `that frame runs ${seconds.toFixed(1)} s at ${bitRate} bits per second, past the ${TX_FRAME_LIMIT_SECONDS} s ceiling. shorten it or raise the rate.`,
+      )
+    }
+
+    const iq =
+      keying === 'afsk'
+        ? afskModulate(bytes, rate, { baud: bitRate })
+        : ookFrame(bytesToBits(bytes), bitRate, rate)
+
+    this.ctx.log(
+      `frame out: ${bytes.length} bytes as ${keying} at ${bitRate} ${keying === 'afsk' ? 'baud' : 'bits per second'} on ${(this.params.centerHz / 1e6).toFixed(3)} MHz`,
+    )
+    await this.transmitIq(iq, rate)
+  }
+
+  /** Interleaved floats to the signed 8 bit pairs the transmit endpoint takes. */
+  private toInt8(iq: Float32Array): Int8Array<ArrayBuffer> {
+    const out = new Int8Array(iq.length)
+    for (let i = 0; i < iq.length; i++) {
+      const v = Math.round(iq[i] * 127)
+      out[i] = v > 127 ? 127 : v < -127 ? -127 : v
+    }
+    return out
+  }
+
+  /** Split into transfer sized pieces and wait when the queue is full. */
+  private async queue(buf: Int8Array<ArrayBuffer>): Promise<void> {
+    for (let off = 0; off < buf.length; off += TRANSFER_BYTES) {
+      while (this.txActive && this.txQueued >= TX_QUEUE_BYTES) {
+        await new Promise<void>((resolve) => this.txRoom.push(resolve))
+      }
+      if (!this.txActive) return
+      const piece = buf.subarray(off, Math.min(off + TRANSFER_BYTES, buf.length))
+      this.txChunks.push(piece)
+      this.txQueued += piece.length
+    }
+  }
+
+  private async drainTx(): Promise<void> {
+    while (this.txActive && this.txQueued > 0) {
+      await new Promise<void>((resolve) => this.txIdle.push(resolve))
+    }
+  }
+
+  private wake(waiters: Array<() => void>): void {
+    const pending = waiters.splice(0, waiters.length)
+    for (const resolve of pending) resolve()
+  }
+
+  /**
+   * Keeps several transfers in flight so the dac never runs dry. WebUSB keeps
+   * writes on one endpoint in order, so issuing without awaiting is safe.
+   * An empty queue sends silence rather than repeating the last buffer.
+   */
+  private async pumpTx(signal: AbortSignal): Promise<void> {
+    const silence = new Int8Array(TRANSFER_BYTES)
+    const pending = new Set<Promise<void>>()
+    let faults = 0
+
+    const send = async (buf: Int8Array<ArrayBuffer>): Promise<void> => {
+      try {
+        await this.usb.bulkOut(EP_TX, buf)
+        faults = 0
+      } catch {
+        faults++
+      }
+    }
+
+    while (!signal.aborted && this.usb.isOpen && faults < 8) {
+      while (pending.size >= TX_DEPTH) await Promise.race(pending)
+      if (signal.aborted || !this.usb.isOpen) break
+
+      const chunk = this.txChunks.shift()
+      if (chunk) {
+        this.txQueued -= chunk.length
+        this.wake(this.txRoom)
+        if (this.txQueued === 0) this.wake(this.txIdle)
+      }
+
+      const p = send(chunk ?? silence)
+      pending.add(p)
+      void p.finally(() => pending.delete(p))
+    }
+
+    await Promise.allSettled([...pending])
+  }
+
   /**
    * A constant baseband offset comes out as an unmodulated carrier at the
    * tuned frequency. Amplitude sits below full scale so the DAC does not clip.
    */
-  private async transmitCarrier(signal: AbortSignal): Promise<void> {
-    const buf = new Int8Array(TRANSFER_BYTES)
-    for (let i = 0; i < buf.length; i += 2) {
-      buf[i] = 96
-      buf[i + 1] = 0
+  private async carrierLoop(): Promise<void> {
+    const block = new Int8Array(TRANSFER_BYTES)
+    for (let i = 0; i < block.length; i += 2) {
+      block[i] = 96
+      block[i + 1] = 0
     }
-    while (!signal.aborted && this.usb.isOpen) {
-      try {
-        await this.usb.bulkOut(EP_TX, buf)
-      } catch {
-        if (signal.aborted || !this.usb.isOpen) return
-        await new Promise((r) => setTimeout(r, 5))
-      }
+    while (this.txActive) {
+      await this.queue(block)
     }
   }
 }
@@ -505,7 +724,7 @@ export const hackrfDriver: DeviceDriver = {
   async open(handle: DeviceHandle, ctx: DriverContext): Promise<DeviceSession> {
     const port = handle.raw as UsbPort
     await port.claim({ interface: 0 })
-    const session = new HackRfSession(port, ctx)
+    const session = new HackRfOneSession(port, ctx)
     await session.init()
     return session
   },

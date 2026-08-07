@@ -6,7 +6,12 @@ import ReceiverPanel from './receiver/ReceiverPanel.vue'
 import SpectrumPanel from './spectrum/SpectrumPanel.vue'
 import GhostBoxPanel from './ghostbox/GhostBoxPanel.vue'
 import ScannerPanel from './scanner/ScannerPanel.vue'
+import SstvPanel from './sstv/SstvPanel.vue'
+import WeatherPanel from './weather/WeatherPanel.vue'
+import AprsPanel from './aprs/AprsPanel.vue'
+import RttyPanel from './rtty/RttyPanel.vue'
 import SnifferPanel from './sniffer/SnifferPanel.vue'
+import TransmitPanel from './transmit/TransmitPanel.vue'
 import TerminalPanel from './terminal/TerminalPanel.vue'
 import MeshPanel from './mesh/MeshPanel.vue'
 import SurveyPanel from './survey/SurveyPanel.vue'
@@ -59,6 +64,52 @@ const TOOLS: ToolManifest[] = [
     requires: [CAPABILITIES.AUDIO_DEMOD],
     component: GhostBoxPanel,
     order: 30,
+  },
+  {
+    id: 'sstv',
+    label: 'sstv',
+    icon: 'image',
+    scope: 'device',
+    requires: [CAPABILITIES.AUDIO_DEMOD],
+    component: SstvPanel,
+    order: 31,
+  },
+  {
+    id: 'apt',
+    label: 'weather sat',
+    icon: 'satellite',
+    scope: 'device',
+    requires: [CAPABILITIES.AUDIO_DEMOD],
+    component: WeatherPanel,
+    order: 32,
+  },
+  {
+    id: 'aprs',
+    label: 'aprs',
+    icon: 'map',
+    scope: 'device',
+    requires: [CAPABILITIES.AUDIO_DEMOD],
+    component: AprsPanel,
+    order: 33,
+  },
+  {
+    id: 'rtty',
+    label: 'rtty',
+    icon: 'code',
+    scope: 'device',
+    requires: [CAPABILITIES.AUDIO_DEMOD],
+    component: RttyPanel,
+    advanced: true,
+    order: 34,
+  },
+  {
+    id: 'transmit',
+    label: 'transmit',
+    icon: 'tower-broadcast',
+    scope: 'device',
+    requires: [CAPABILITIES.TRANSMIT_RF],
+    component: TransmitPanel,
+    order: 35,
   },
   {
     id: 'sniffer',
