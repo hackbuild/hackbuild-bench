@@ -20,6 +20,7 @@ import DeviceLogPanel from './log/DeviceLogPanel.vue'
 import AnalysisPanel from './analysis/AnalysisPanel.vue'
 import PlaybooksPanel from './playbooks/PlaybooksPanel.vue'
 import AutomationsPanel from './automations/AutomationsPanel.vue'
+import SessionLogPanel from './sessionlog/SessionLogPanel.vue'
 
 /**
  * Every panel the bench can show.
@@ -196,6 +197,16 @@ const TOOLS: ToolManifest[] = [
     component: AutomationsPanel,
     blurb: 'trigger, condition, action',
     order: 20,
+  },
+  {
+    id: 'sessionlog',
+    label: 'session log',
+    icon: 'list-check',
+    scope: 'bench',
+    requires: [],
+    component: SessionLogPanel,
+    blurb: 'everything that happened',
+    order: 30,
   },
 ]
 

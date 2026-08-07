@@ -12,7 +12,7 @@ import type {
   ConditionConfig,
   TriggerConfig,
 } from '@/core/automations/actions'
-import { useBench } from './bench'
+import { useSessionLog } from './sessionLog'
 
 export interface Rule {
   id: string
@@ -49,11 +49,14 @@ export const useAutomations = defineStore('automations', () => {
   const { toast } = useToast()
 
   const env = {
-    log: (message: string) => pushLog('', message, 'fire'),
+    log: (message: string) => {
+      pushLog('', message, 'fire')
+      useSessionLog().note('automation', message)
+    },
     notify: (message: string) => toast(message),
     setRecording: (on: boolean) => {
-      const bench = useBench()
-      if (on !== bench.recording) bench.toggleRecording()
+      const session = useSessionLog()
+      if (on && !session.recording) session.start()
     },
   }
 

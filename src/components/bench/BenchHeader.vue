@@ -2,23 +2,30 @@
 import { computed, onBeforeUnmount, ref } from 'vue'
 import { HbButton, HbIcon, HbMark } from '@virgilvox/hackbuild-ui'
 import { useBench } from '@/stores/bench'
+import { useSessionLog } from '@/stores/sessionLog'
+import { useDevices } from '@/stores/devices'
 import { useConnectDialog } from '@/composables/useConnectDialog'
 
 const bench = useBench()
+const session = useSessionLog()
+const devices = useDevices()
 const connect = useConnectDialog()
 
 const elapsed = ref('0:00')
 let timer: ReturnType<typeof setInterval> | null = null
 
 const recordLabel = computed(() =>
-  bench.recording ? `recording ${elapsed.value}` : 'record session',
+  session.recording ? `recording ${elapsed.value}` : 'record session',
 )
 
 function toggleRecord(): void {
-  bench.toggleRecording()
-  if (bench.recording) {
+  session.toggle()
+  if (session.recording) {
+    // jump to the log so it is obvious where the recording goes.
+    devices.focus('sessionlog')
+    bench.setView('focus')
     timer = setInterval(() => {
-      const s = Math.floor((Date.now() - bench.recordStartedAt) / 1000)
+      const s = Math.floor((Date.now() - session.startedAt) / 1000)
       elapsed.value = `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`
     }, 500)
   } else if (timer) {
@@ -46,9 +53,9 @@ onBeforeUnmount(() => {
 
     <button
       class="bn-rec"
-      :class="{ 'is-live': bench.recording }"
+      :class="{ 'is-live': session.recording }"
       type="button"
-      :aria-pressed="bench.recording"
+      :aria-pressed="session.recording"
       @click="toggleRecord"
     >
       <span class="bn-d"></span>{{ recordLabel }}
