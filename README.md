@@ -75,3 +75,33 @@ every device that provides them and nowhere else.
 Read `RULES.md` before changing anything. It covers the design system, the
 architecture boundaries, and the language rules, and it wins over every other
 document in the repo.
+
+## Deploying
+
+Every push to main builds and publishes to GitHub Pages through
+`.github/workflows/deploy.yml`. The live build is at
+https://hackbuild.github.io/hackbuild-bench/
+
+To move it to app.hack.build, two things have to happen in order:
+
+1. Add a CNAME record at the DNS provider for hack.build:
+
+   ```
+   app.hack.build.  CNAME  hackbuild.github.io.
+   ```
+
+   hack.build runs on NS1 nameservers (dns1 through dns4.p08.nsone.net), so
+   this record goes in the NS1 control panel. DigitalOcean does not hold this
+   zone, and doctl cannot reach it.
+
+2. Once that record resolves, point Pages at the domain:
+
+   ```
+   gh api -X PUT repos/hackbuild/hackbuild-bench/pages -f cname=app.hack.build
+   ```
+
+Do them in that order. Setting the custom domain before the record exists
+redirects the github.io URL to a name that does not resolve, which takes the
+site offline until DNS catches up.
+
+`public/CNAME` already carries the domain, so the file is in place for step 2.
