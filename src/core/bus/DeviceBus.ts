@@ -262,6 +262,20 @@ export class DeviceBus {
     return entry
   }
 
+  /**
+   * Publish demodulated audio for a device from outside the driver.
+   *
+   * The rtl-sdr driver emits raw iq and the demodulation to audio happens in
+   * the receiver composable, so the resulting audio has to re-enter the bus
+   * here to reach the transcriber and the recorder the same way a driver that
+   * demodulates on its own would emit it.
+   */
+  emitAudio(id: string, samples: Float32Array, sampleRate: number): void {
+    const entry = this.live.get(id)
+    if (!entry) return
+    this.dispatch(id, entry, { kind: 'audio', samples, sampleRate })
+  }
+
   private dispatch(
     id: string,
     entry: Live,

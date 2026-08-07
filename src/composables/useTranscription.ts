@@ -26,8 +26,13 @@ export function useTranscription(deviceId: string) {
   const lines = ref<TranscriptLine[]>([])
   const model = ref('whisper tiny.en')
   const backend = ref(hasWebGPU() ? 'webgpu' : 'wasm')
+  /** Live one line status from the engine, so you can see audio is flowing. */
+  const status = ref('off')
+  /** Total seconds of audio handed to the model, proof it is being fed. */
+  const fedSeconds = ref(0)
 
   const engine = shallowRef<Transcriber | null>(null)
+  let statusTimer: ReturnType<typeof setInterval> | null = null
 
   /** Set by the spirit box so a caught word carries the frequency it came from. */
   const tagRange = ref<{ fromHz: number; toHz: number } | null>(null)
@@ -36,6 +41,7 @@ export function useTranscription(deviceId: string) {
     if (a.kind !== 'audio' || !ready.value) return
     const chunk = a as AudioChunk
     engine.value?.feed(chunk.samples, chunk.sampleRate)
+    if (chunk.sampleRate > 0) fedSeconds.value += chunk.samples.length / chunk.sampleRate
   })
 
   async function enable(): Promise<void> {
@@ -60,7 +66,11 @@ export function useTranscription(deviceId: string) {
         lines.value = [...lines.value, line].slice(-200)
       })
       engine.value = t
+      backend.value = t.backend
       ready.value = true
+      statusTimer = setInterval(() => {
+        if (engine.value) status.value = engine.value.status()
+      }, 500)
     } catch (err) {
       error.value =
         err instanceof Error
@@ -75,6 +85,9 @@ export function useTranscription(deviceId: string) {
     engine.value?.stop()
     engine.value = null
     ready.value = false
+    status.value = 'off'
+    if (statusTimer) clearInterval(statusTimer)
+    statusTimer = null
   }
 
   function clear(): void {
@@ -84,6 +97,7 @@ export function useTranscription(deviceId: string) {
   onBeforeUnmount(() => {
     stopStream()
     engine.value?.stop()
+    if (statusTimer) clearInterval(statusTimer)
   })
 
   return {
@@ -94,6 +108,8 @@ export function useTranscription(deviceId: string) {
     lines,
     model,
     backend,
+    status,
+    fedSeconds,
     tagRange,
     enable,
     disable,

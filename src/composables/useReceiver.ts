@@ -35,7 +35,13 @@ export function useReceiver(deviceId: string) {
     }
 
     const audio = chain.process(chunk.samples)
-    if (audio.length) sink.value?.push(audio, 48000)
+    if (audio.length) {
+      sink.value?.push(audio, 48000)
+      // the same audio re-enters the bus so the transcriber and the recorder
+      // receive it, since the demodulation happened here rather than in the
+      // driver. a fresh copy, because the sink keeps a reference to play.
+      bus.emitAudio(deviceId, audio.slice(), 48000)
+    }
   })
 
   function setMode(next: DemodMode): void {
