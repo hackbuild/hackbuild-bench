@@ -122,6 +122,8 @@ export const hackrfDescriptor: DeviceDescriptor = {
     { key: 'vga', label: 'vga', unit: 'dB', min: 0, max: 62, step: 2, default: 20 },
     { key: 'txvga', label: 'tx gain', unit: 'dB', min: 0, max: 47, step: 1, default: 0 },
     { key: 'amp', label: 'front end amp', min: 0, max: 1, step: 1, default: 0 },
+    { key: 'sweepLowHz', label: 'sweep from', unit: 'Hz', min: 1e6, max: 6000e6, default: 400e6, log: true },
+    { key: 'sweepHighHz', label: 'sweep to', unit: 'Hz', min: 1e6, max: 6000e6, default: 500e6, log: true },
   ],
   usbFilters: USB_FILTERS,
   limits: {
@@ -351,6 +353,12 @@ class HackRfOneSession implements HackRfSession {
       return
     }
 
+    if (head === 'sweep') {
+      await this.setTransceiverMode(MODE.RECEIVE)
+      void this.sweep(abort.signal)
+      return
+    }
+
     if (head === 'audio') {
       const demod = (tail ?? 'nfm') as DemodMode
       if (!DEMODS.includes(demod)) {
@@ -422,6 +430,58 @@ class HackRfOneSession implements HackRfSession {
       (chunk) => this.onSamples(chunk, demod),
       signal,
     )
+  }
+
+  /**
+   * Wideband sweep by stepping the tuner across a range, one FFT per step,
+   * stitched into a panorama. This scans far wider than the instantaneous
+   * window using only the verified setFreq and fft paths, at the cost of being
+   * slower than the device's native hardware sweep.
+   *
+   * The range comes from sweepLowHz and sweepHighHz, defaulting to the whole
+   * tuner range. Each step keeps the middle of the window and drops the edges
+   * where the filter rolls off and the DC spike sits.
+   */
+  private async sweep(signal: AbortSignal): Promise<void> {
+    const lowHz = Math.max(1e6, this.params.sweepLowHz || 1e6)
+    const highHz = Math.min(6000e6, this.params.sweepHighHz || 6000e6)
+    const rate = this.params.sampleRate
+    // keep the middle 75 percent of each window, so steps overlap slightly.
+    const usable = rate * 0.75
+    const segBins = Math.floor(FFT_SIZE * 0.75)
+    const edge = Math.floor((FFT_SIZE - segBins) / 2)
+
+    while (!signal.aborted && this.usb.isOpen) {
+      const panorama: number[] = []
+      let center = lowHz + usable / 2
+      while (center <= highHz && !signal.aborted) {
+        await this.setFreq(center)
+        // let the pll settle before the sample is meaningful.
+        await new Promise((r) => setTimeout(r, 6))
+        let chunk: Uint8Array
+        try {
+          chunk = await this.usb.bulkIn(EP_RX, TRANSFER_BYTES)
+        } catch {
+          if (signal.aborted) return
+          break
+        }
+        const s = new Int8Array(chunk.buffer, chunk.byteOffset, chunk.byteLength)
+        const iq = new Float32Array(Math.min(s.length, FFT_SIZE * 2))
+        for (let i = 0; i < iq.length; i++) iq[i] = s[i] / 127
+        const bins = this.analyzer.process(iq)
+        for (let i = edge; i < edge + segBins; i++) panorama.push(bins[i])
+        center += usable
+      }
+      if (signal.aborted) return
+      this.params.centerHz = (lowHz + highHz) / 2
+      const frame: Emitted<FftFrame> = {
+        kind: 'fft',
+        bins: Float32Array.from(panorama),
+        centerHz: (lowHz + highHz) / 2,
+        sampleRate: highHz - lowHz,
+      }
+      this.ctx.emit(frame)
+    }
   }
 
   private onSamples(chunk: Uint8Array, demod: DemodMode | null): void {

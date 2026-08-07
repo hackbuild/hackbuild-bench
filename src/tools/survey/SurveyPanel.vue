@@ -39,11 +39,13 @@ onBeforeUnmount(() => {
 
 <template>
   <div>
-    <div class="bn-banner">
-      <HbIcon name="wifi" />
+    <div class="bn-banner is-warn">
+      <HbIcon name="warning" />
       <span>
-        this reads the appliance rest api straight from the tab. survey is passive, so it
-        only lists what is already broadcasting.
+        this reads the pineapple rest api straight from the tab, which the browser only
+        allows against a pineapple whose firmware permits this origin. stock mark vii
+        firmware does not, so if the list stays empty the browser is refusing the response,
+        not the pineapple being quiet. survey is passive and only lists what is broadcasting.
       </span>
     </div>
 

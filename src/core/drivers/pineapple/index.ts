@@ -25,6 +25,7 @@ const POLL_MS = 3000
 // access fields where a firmware differs.
 const PATH_LOGIN = '/api/login'
 const PATH_INFO = '/api/system/info'
+const PATH_SCAN = '/api/recon/scan'
 const PATH_APS = '/api/recon/aps'
 const PATH_CLIENTS = '/api/recon/clients'
 const PATH_PINEAP = '/api/pineap/settings'
@@ -81,7 +82,7 @@ const descriptor: DeviceDescriptor = {
   ],
   limits: {
     [CAPABILITIES.NET_SURVEY]:
-      'the pineapple serves plain http on its own network, so an https page cannot call it. run the bench on http://localhost and join the pineapple network first.',
+      'this is the one device the browser cannot reach on its own. two walls: the pineapple serves plain http so an https page is blocked as mixed content, and stock mark vii firmware sends no cross origin headers, so even from http on localhost the browser refuses the response. it works only against a pineapple whose firmware is set to allow this origin. everything else on the bench needs no such change.',
   },
 }
 
@@ -111,6 +112,7 @@ function normalizeRows(data: unknown): ApRow[] {
 
 class PineappleSession implements DeviceSession {
   private stopped = false
+  private scanStarted = false
 
   constructor(
     private endpoint: HttpEndpoint,
@@ -192,6 +194,19 @@ class PineappleSession implements DeviceSession {
   }
 
   private async pollOnce(): Promise<void> {
+    // the mark vii recon module is scan based: start a scan, then read the
+    // results it accumulated. we start one on the first pass and let later
+    // passes read what it has found so far.
+    if (!this.scanStarted) {
+      try {
+        await this.endpoint.post(PATH_SCAN, { scan_time: 30, continuous: true })
+        this.scanStarted = true
+      } catch {
+        // some firmwares scan continuously with no start call, so fall through
+        // to reading results rather than giving up.
+        this.scanStarted = true
+      }
+    }
     const apData = await this.endpoint.get<unknown>(PATH_APS)
     for (const row of normalizeRows(apData)) this.emitRow(row)
     const clientData = await this.endpoint.get<unknown>(PATH_CLIENTS)

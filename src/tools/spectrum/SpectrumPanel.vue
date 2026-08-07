@@ -39,8 +39,14 @@ const span = computed(() => {
 const lowEdge = computed(() => stream.centerHz.value - span.value / 2)
 const highEdge = computed(() => stream.centerHz.value + span.value / 2)
 
+const canWideSweep = computed(() =>
+  (node.value?.descriptor.params ?? []).some((p) => p.key === 'sweepLowHz'),
+)
+
 async function sweep(): Promise<void> {
-  const mode = node.value?.kind === 'ubertooth' ? 'spectrum' : 'rx'
+  // the hackrf steps a real wideband panorama; other radios show the
+  // instantaneous window they are tuned to.
+  const mode = node.value?.kind === 'ubertooth' ? 'spectrum' : canWideSweep.value ? 'sweep' : 'rx'
   await devices.start(props.deviceId, mode)
 }
 
@@ -74,6 +80,11 @@ onBeforeUnmount(() => {
         </HbButton>
       </div>
     </div>
+
+    <p v-if="canWideSweep && !bench.advanced" class="bn-note" style="margin-top: 0">
+      sweep steps the tuner across a range and stitches the result into one wide picture.
+      switch to advanced to set the range, the default is 400 to 500 MHz.
+    </p>
 
     <InstScope :bins="stream.fft.value" :height="180" ruled :demo="!streaming" />
     <InstWaterfall
