@@ -2037,7 +2037,9 @@ canvas {
   color: var(--hb-ink);
   padding: 2px 4px;
 }
-.bn-wbody {
+/* scoped under the widget card so it does not collide with the ears panel's
+   own .bn-wbody, which is slime text on void. */
+.bn-wcard .bn-wbody {
   display: flex;
   flex-direction: column;
   align-items: center;

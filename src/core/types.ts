@@ -33,6 +33,17 @@ export interface AccessField {
   placeholder?: string
 }
 
+/**
+ * A plain-language explainer shown before connecting a device that needs
+ * context, such as a board the user must flash first.
+ */
+export interface DeviceIntro {
+  title: string
+  /** One paragraph per entry, in plain words. */
+  body: string[]
+  link?: { label: string; href: string }
+}
+
 /** What a driver says about itself before anything is connected. */
 export interface DeviceDescriptor {
   /** Stable driver id. Also the registry key. */
@@ -62,6 +73,9 @@ export interface DeviceDescriptor {
    * transports the browser has no picker for.
    */
   accessFields?: AccessField[]
+
+  /** Shown before connecting, for a device that needs setup context first. */
+  intro?: DeviceIntro
 }
 
 /** A connected device on the bus. */

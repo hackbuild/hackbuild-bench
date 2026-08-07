@@ -49,12 +49,14 @@ function firstTransport(d: DeviceDriver): TransportKind {
 }
 
 function toggle(d: DeviceDriver): void {
-  if (!d.descriptor.accessFields?.length) {
+  // a device with an intro or access fields expands to explain or ask first;
+  // anything else connects on the click.
+  if (!d.descriptor.accessFields?.length && !d.descriptor.intro) {
     void go(d, firstTransport(d))
     return
   }
   expanded.value = expanded.value === d.descriptor.kind ? null : d.descriptor.kind
-  if (expanded.value) {
+  if (expanded.value && d.descriptor.accessFields) {
     fields.value = Object.fromEntries(
       d.descriptor.accessFields.map((f) => [f.key, f.default ?? '']),
     )
@@ -116,6 +118,38 @@ const sorted = computed(() =>
           </span>
           <span class="bn-chipx">{{ d.descriptor.transports.join(' or ') }}</span>
         </button>
+
+        <div
+          v-if="expanded === d.descriptor.kind && d.descriptor.intro"
+          class="bn-capcard"
+          style="margin-top: 6px"
+        >
+          <div class="bn-subhead" style="margin-top: 0">{{ d.descriptor.intro.title }}</div>
+          <p v-for="(para, i) in d.descriptor.intro.body" :key="i" class="bn-note" :style="i === 0 ? 'margin-top:0' : ''">
+            {{ para }}
+          </p>
+          <div class="bn-acts" style="margin-top: 10px">
+            <HbButton
+              v-if="d.descriptor.intro.link"
+              as="a"
+              size="sm"
+              :href="d.descriptor.intro.link.href"
+              target="_blank"
+            >
+              <template #icon><HbIcon name="external" /></template>
+              {{ d.descriptor.intro.link.label }}
+            </HbButton>
+            <HbButton
+              variant="danger"
+              size="sm"
+              :loading="devices.connecting"
+              @click="go(d, firstTransport(d))"
+            >
+              <template #icon><HbIcon name="plug-circle-plus" /></template>
+              i have a flashed board, connect
+            </HbButton>
+          </div>
+        </div>
 
         <p
           v-if="expanded === d.descriptor.kind && caveat(d)"
