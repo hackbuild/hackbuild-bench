@@ -5,12 +5,14 @@ import type { IconName } from '@virgilvox/hackbuild-ui'
 import { useDevices } from '@/stores/devices'
 import { useBench } from '@/stores/bench'
 import { useConnectDialog } from '@/composables/useConnectDialog'
+import { useDemoMode } from '@/composables/useDemoMode'
 import { benchTools } from '@/tools/registry'
 import type { DeviceNode } from '@/core/types'
 
 const devices = useDevices()
 const bench = useBench()
 const connect = useConnectDialog()
+const demo = useDemoMode()
 
 const tools = computed(() => benchTools())
 
@@ -86,6 +88,10 @@ function select(id: string): void {
       <HbButton size="sm" @click="connect.open()">
         <template #icon><HbIcon name="plug-circle-plus" /></template>
         connect a device
+      </HbButton>
+      <HbButton size="sm" :loading="demo.busy.value" @click="demo.toggle()">
+        <template #icon><HbIcon name="flask" /></template>
+        {{ demo.on.value ? 'leave demo mode' : 'demo mode' }}
       </HbButton>
     </div>
   </nav>

@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, ref } from 'vue'
-import { HbButton, HbIcon } from '@virgilvox/hackbuild-ui'
+import { HbButton, HbIcon, HbMark } from '@virgilvox/hackbuild-ui'
 import { useBench } from '@/stores/bench'
 import { useConnectDialog } from '@/composables/useConnectDialog'
 
@@ -35,7 +35,10 @@ onBeforeUnmount(() => {
 
 <template>
   <header class="bn-top">
-    <span class="bn-wordmark">hack<b>.build</b></span>
+    <a class="bn-brand" href="https://hack.build" rel="noreferrer">
+      <HbMark :size="30" reversed label="hack.build" />
+      <span class="bn-wordmark">hack<b>.build</b></span>
+    </a>
     <span class="bn-prod">bench</span>
     <span class="bn-tagline">make things. break things. repeat.</span>
 

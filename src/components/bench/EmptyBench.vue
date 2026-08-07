@@ -2,8 +2,10 @@
 import { HbButton, HbIcon } from '@virgilvox/hackbuild-ui'
 import { transportSupport } from '@/core/transport/support'
 import { useConnectDialog } from '@/composables/useConnectDialog'
+import { useDemoMode } from '@/composables/useDemoMode'
 
 const connect = useConnectDialog()
+const demo = useDemoMode()
 const support = transportSupport()
 
 const missing = Object.values(support).filter(
@@ -32,6 +34,10 @@ const missing = Object.values(support).filter(
       <HbButton variant="danger" @click="connect.open()">
         <template #icon><HbIcon name="plug-circle-plus" /></template>
         connect a device
+      </HbButton>
+      <HbButton :loading="demo.busy.value" @click="demo.enable()">
+        <template #icon><HbIcon name="flask" /></template>
+        demo mode
       </HbButton>
     </div>
   </div>

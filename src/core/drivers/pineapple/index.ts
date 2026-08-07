@@ -19,6 +19,10 @@ import { HttpEndpoint } from '../../transport/http'
 const DEFAULT_BASE = 'http://172.16.42.1:1471'
 const POLL_MS = 3000
 
+// the mark vii firmware has changed its api shape across releases, so these
+// paths are a starting point rather than a guarantee. the survey panel shows
+// the raw response so a mismatch is visible, and the paths are read from the
+// access fields where a firmware differs.
 const PATH_LOGIN = '/api/login'
 const PATH_INFO = '/api/system/info'
 const PATH_APS = '/api/recon/aps'
@@ -59,11 +63,26 @@ interface ApRow {
 const descriptor: DeviceDescriptor = {
   kind: 'pineapple',
   name: 'WiFi Pineapple',
-  blurb: 'recon on the network you run',
+  blurb: 'recon on the network you run, over its rest api',
   icon: 'wifi',
   transports: ['http'],
   capabilities: [CAPABILITIES.NET_SURVEY, CAPABILITIES.NET_ATTACK],
   params: [],
+  accessFields: [
+    {
+      key: 'base',
+      label: 'address',
+      type: 'url',
+      default: DEFAULT_BASE,
+      placeholder: DEFAULT_BASE,
+    },
+    { key: 'username', label: 'username', type: 'text', default: 'root' },
+    { key: 'password', label: 'password', type: 'password', default: '' },
+  ],
+  limits: {
+    [CAPABILITIES.NET_SURVEY]:
+      'the pineapple serves plain http on its own network, so an https page cannot call it. run the bench on http://localhost and join the pineapple network first.',
+  },
 }
 
 const sleep = (ms: number, signal: AbortSignal): Promise<void> =>
@@ -205,10 +224,26 @@ export const pineappleDriver: DeviceDriver = {
     return ['http']
   },
 
-  async requestAccess(transport: TransportKind): Promise<DeviceHandle | null> {
+  async requestAccess(
+    transport: TransportKind,
+    fields?: Record<string, string>,
+  ): Promise<DeviceHandle | null> {
     if (transport !== 'http') return null
-    const access = pendingAccess ?? { base: DEFAULT_BASE, username: '', password: '' }
+
+    // the connect dialog collects the descriptor's accessFields and passes
+    // them here. setPendingAccess stays as the path for callers that are not
+    // the dialog, such as a playbook reconnecting a known appliance.
+    const access: PineappleAccess = {
+      base: fields?.base?.trim() || pendingAccess?.base || DEFAULT_BASE,
+      username: fields?.username ?? pendingAccess?.username ?? '',
+      password: fields?.password ?? pendingAccess?.password ?? '',
+    }
     pendingAccess = null
+
+    if (!access.username) {
+      throw new Error('the pineapple needs a username and password, the defaults are on its label')
+    }
+
     return {
       kind: 'pineapple',
       transport: 'http',

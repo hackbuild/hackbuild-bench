@@ -95,6 +95,14 @@ canvas {
   color: var(--hb-paper);
   border-bottom: 3px solid var(--hb-pink);
 }
+.bn-brand {
+  display: flex;
+  align-items: center;
+  gap: var(--hb-s2);
+  text-decoration: none;
+  color: inherit;
+  flex: 0 0 auto;
+}
 .bn-wordmark {
   font-family: var(--hb-utility);
   font-weight: 700;
@@ -278,6 +286,17 @@ canvas {
   overflow: auto;
   padding: 14px;
   min-height: 0;
+}
+/* everything the stage holds stays within the stage width, so a wide table or
+   readout scrolls inside its own panel rather than widening the page. */
+.bn-stage > * {
+  max-width: 100%;
+  min-width: 0;
+}
+.bn-pcard,
+.bn-plane {
+  max-width: 100%;
+  min-width: 0;
 }
 
 /* ---- rail --------------------------------------------------------------- */
@@ -468,6 +487,14 @@ canvas {
   color: var(--hb-ink-3);
   line-height: 1.5;
   margin: 12px 0 0;
+}
+.bn-subhead select {
+  font-family: var(--hb-utility);
+  font-size: 10px;
+  border: var(--hb-border) solid var(--hb-ink);
+  background: var(--hb-paper-raised);
+  color: var(--hb-ink);
+  padding: 2px 4px;
 }
 
 .bn-route {
@@ -875,6 +902,15 @@ canvas {
   background: var(--hb-paper-raised);
   padding: 2px 7px;
   color: var(--hb-ink);
+}
+.bn-tinyact[aria-pressed='true'] {
+  background: var(--hb-ink);
+  color: var(--hb-paper);
+}
+.bn-tinyact:disabled {
+  border-color: var(--hb-ink-4);
+  color: var(--hb-ink-4);
+  cursor: default;
 }
 
 /* ---- banner ------------------------------------------------------------- */
@@ -1601,6 +1637,59 @@ canvas {
 
 /* ---- analysis ----------------------------------------------------------- */
 
+.bn-leadrow {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--hb-s3);
+  flex-wrap: wrap;
+  margin-bottom: var(--hb-s3);
+}
+.bn-lead {
+  font-family: var(--hb-body);
+  font-size: 12px;
+  color: var(--hb-ink-2);
+  line-height: 1.6;
+  margin: 0;
+  flex: 1;
+  min-width: 220px;
+  max-width: var(--hb-measure);
+}
+.bn-ta {
+  width: 100%;
+  font-family: var(--hb-readout);
+  font-size: 15px;
+  border: var(--hb-border) solid var(--hb-ink);
+  background: var(--hb-paper-raised);
+  color: var(--hb-ink);
+  padding: var(--hb-s2);
+}
+.bn-inmeta {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  flex-wrap: wrap;
+  margin-top: 6px;
+}
+.bn-inmeta .bn-k {
+  font-family: var(--hb-utility);
+  font-size: 9px;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--hb-ink-3);
+}
+.bn-inmeta .bn-k + .bn-k {
+  border-left: 1px solid var(--hb-paper-edge);
+  padding-left: 10px;
+}
+.bn-inmeta .bn-hexp {
+  font-family: var(--hb-readout);
+  font-size: 14px;
+  color: var(--hb-ink-2);
+  word-break: break-all;
+  flex: 1;
+  min-width: 120px;
+}
+
 .bn-op {
   background: var(--hb-paper-raised);
   border: var(--hb-border) solid var(--hb-ink);
@@ -1609,6 +1698,7 @@ canvas {
   display: flex;
   align-items: center;
   gap: 10px;
+  flex-wrap: wrap;
 }
 .bn-op:last-child {
   border-bottom-width: var(--hb-border);
@@ -1630,6 +1720,24 @@ canvas {
   font-family: var(--hb-readout);
   font-size: 15px;
   color: var(--hb-ink-3);
+}
+.bn-op .bn-btns {
+  display: flex;
+  gap: 4px;
+}
+.bn-op .bn-out {
+  flex-basis: 100%;
+  font-family: var(--hb-readout);
+  font-size: 15px;
+  color: var(--hb-ink-2);
+  background: var(--hb-paper-sunk);
+  border: 1px solid var(--hb-paper-edge);
+  padding: 3px 7px;
+  word-break: break-all;
+}
+.bn-op .bn-out.is-err {
+  color: var(--hb-err);
+  border-color: var(--hb-err);
 }
 .bn-io {
   font-family: var(--hb-readout);
@@ -1662,22 +1770,61 @@ canvas {
 .bn-magic .bn-mb {
   padding: 12px;
 }
+.bn-mnote {
+  font-family: var(--hb-body);
+  font-size: 11px;
+  color: var(--hb-ink-3);
+  line-height: 1.5;
+  margin: var(--hb-s2) 0 0;
+}
+.bn-solved {
+  font-family: var(--hb-utility);
+  font-size: 12px;
+  color: var(--hb-ink);
+  background: var(--hb-paper-raised);
+  border: var(--hb-border) solid var(--hb-ok);
+  padding: 7px 10px;
+  margin-top: 10px;
+  word-break: break-word;
+}
+.bn-solved.is-miss {
+  border-color: var(--hb-warn);
+}
 .bn-hit {
   display: flex;
-  align-items: center;
-  gap: 10px;
-  padding: 7px 0;
+  flex-direction: column;
+  gap: 6px;
+  padding: 9px 0;
   border-bottom: 1px dashed var(--hb-paper-edge);
-  flex-wrap: wrap;
 }
 .bn-hit:last-child {
   border-bottom: 0;
+}
+.bn-hit .bn-htop {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
 }
 .bn-hit .bn-name {
   font-family: var(--hb-utility);
   font-size: 12px;
   font-weight: 600;
-  width: 150px;
+  flex: 1;
+  min-width: 120px;
+}
+.bn-hit .bn-why {
+  display: flex;
+  gap: 4px;
+  flex-wrap: wrap;
+}
+.bn-hit .bn-prev {
+  font-family: var(--hb-readout);
+  font-size: 15px;
+  background: var(--hb-void);
+  color: var(--hb-slime);
+  padding: 4px 8px;
+  word-break: break-all;
 }
 .bn-hit .bn-bw {
   flex: 1;
@@ -1687,6 +1834,7 @@ canvas {
   min-width: 60px;
 }
 .bn-hit .bn-bar {
+  display: block;
   height: 100%;
   background: var(--hb-pink);
 }
@@ -1812,34 +1960,167 @@ canvas {
     grid-template-columns: repeat(2, 1fr);
   }
 }
-@media (max-width: 760px) {
+
+/* ---- tablet and phone: one column, rail becomes a strip ----------------- */
+
+@media (max-width: 900px) {
+  /* nothing is allowed to force the page wider than the screen. */
+  html,
+  body {
+    max-width: 100%;
+    overflow-x: hidden;
+  }
+
   .bn-app {
     grid-template-columns: 1fr;
     grid-template-areas: 'top' 'rail' 'main' 'status';
     grid-template-rows: auto auto 1fr auto;
     height: auto;
-    min-height: 100vh;
+    min-height: 100dvh;
   }
-  .bn-rail {
-    border-right: 0;
-    border-bottom: var(--hb-border) solid var(--hb-paper-edge);
-    max-height: 40vh;
-  }
-  .bn-railact {
-    flex-direction: row;
+
+  /* header wraps instead of pushing its buttons off screen. the tagline and
+     the fake command box are the first to go. */
+  .bn-top {
+    height: auto;
+    flex-wrap: wrap;
+    gap: var(--hb-s2);
+    padding: var(--hb-s2) var(--hb-s3);
+    row-gap: var(--hb-s2);
   }
   .bn-tagline,
   .bn-cmdk {
     display: none;
   }
+  .bn-rec {
+    order: 3;
+  }
+  .bn-brand {
+    margin-right: auto;
+  }
+
+  /* the rail turns into a horizontal strip of chips that scrolls sideways,
+     so it costs one row of height instead of a whole column. */
+  .bn-rail {
+    flex-direction: row;
+    align-items: stretch;
+    border-right: 0;
+    border-bottom: var(--hb-border) solid var(--hb-paper-edge);
+    overflow-x: auto;
+    overflow-y: hidden;
+    padding: var(--hb-s2);
+    gap: var(--hb-s2);
+    -webkit-overflow-scrolling: touch;
+  }
+  .bn-railsec {
+    display: none;
+  }
+  .bn-devs {
+    flex-direction: row;
+    padding: 0;
+    gap: var(--hb-s2);
+  }
+  .bn-dev {
+    flex: 0 0 auto;
+    width: auto;
+    box-shadow: 2px 2px 0 0 var(--hb-ink);
+  }
+  .bn-dev.is-on {
+    box-shadow: 2px 2px 0 0 var(--hb-pink);
+  }
+  .bn-dev .bn-nm {
+    max-width: 34vw;
+  }
+  .bn-railact {
+    flex-direction: row;
+    margin-top: 0;
+    margin-left: auto;
+    padding: 0;
+    border-top: 0;
+    flex: 0 0 auto;
+    align-self: center;
+    gap: var(--hb-s2);
+  }
+  .bn-railact > * {
+    width: auto;
+  }
+  .bn-railempty {
+    display: none;
+  }
+
+  .bn-stage {
+    padding: var(--hb-s3);
+  }
+
+  /* the plane bar is the other common overflow source: let it wrap and let
+     the route control sit on its own line. */
+  .bn-planebar {
+    flex-wrap: wrap;
+    gap: var(--hb-s2);
+  }
+  .bn-planebar .bn-grow {
+    flex-basis: 100%;
+    height: 0;
+  }
+  .bn-route,
+  .bn-route select {
+    max-width: 100%;
+  }
+
+  /* the big readouts shrink so they never set the page width. */
+  .bn-digits {
+    font-size: 40px;
+    max-width: 100%;
+  }
+  .bn-freq {
+    font-size: 34px;
+  }
+  .bn-statc .bn-v {
+    font-size: 22px;
+  }
+
+  /* any wide inner surface scrolls inside itself rather than the page. */
+  .bn-meta,
+  .bn-knobs,
+  .bn-reads,
+  .bn-pills,
+  .bn-packs,
+  .bn-capstrip,
+  .bn-subtabs {
+    max-width: 100%;
+  }
+  .bn-subtabs {
+    overflow-x: auto;
+  }
   .bn-rack {
     grid-template-columns: 1fr;
   }
-  .bn-digits {
-    font-size: 44px;
+  .bn-flow {
+    flex-direction: column;
+    align-items: stretch;
   }
-  .bn-freq {
-    font-size: 40px;
+  .bn-node {
+    width: auto;
+  }
+  .bn-arrow {
+    transform: rotate(90deg);
+    padding: 6px 0;
+  }
+}
+
+/* touch targets get taller on coarse pointers so buttons are tappable. */
+@media (pointer: coarse) {
+  .bn-subtab,
+  .bn-pill,
+  .bn-pack,
+  .bn-tinyact,
+  .bn-seg2 button,
+  .bn-toggle {
+    min-height: 40px;
+  }
+  .bn-list .bn-row {
+    padding-top: var(--hb-s2);
+    padding-bottom: var(--hb-s2);
   }
 }
 

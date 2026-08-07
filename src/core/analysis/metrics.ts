@@ -156,6 +156,84 @@ export function looksLikeText(bytes: Uint8Array): boolean {
   return printableRatio(bytes) >= 0.85 && shannonEntropy(bytes) < 6
 }
 
+/** How many of the known words the buffer contains, counted once each. */
+export function wordHits(bytes: Uint8Array): number {
+  if (bytes.length === 0) return 0
+  const text = decodeLatin1(bytes).toLowerCase()
+  let hits = 0
+  for (const w of COMMON_WORDS) if (text.includes(w)) hits++
+  return hits
+}
+
+export type Utf8Kind = 'ascii' | 'utf8' | 'invalid'
+
+/**
+ * Strict. Overlong encodings, surrogate code points, and truncated tails all
+ * come back invalid, so a buffer that happens to hold high bytes is not
+ * reported as text.
+ */
+export function utf8Kind(bytes: Uint8Array): Utf8Kind {
+  let multibyte = false
+  let i = 0
+  while (i < bytes.length) {
+    const b = bytes[i]
+    if (b < 0x80) {
+      i++
+      continue
+    }
+    let need: number
+    let cp: number
+    if (b >= 0xc2 && b <= 0xdf) {
+      need = 1
+      cp = b & 0x1f
+    } else if (b >= 0xe0 && b <= 0xef) {
+      need = 2
+      cp = b & 0x0f
+    } else if (b >= 0xf0 && b <= 0xf4) {
+      need = 3
+      cp = b & 0x07
+    } else {
+      return 'invalid'
+    }
+    if (i + need >= bytes.length) return 'invalid'
+    for (let k = 1; k <= need; k++) {
+      const c = bytes[i + k]
+      if (c < 0x80 || c > 0xbf) return 'invalid'
+      cp = (cp << 6) | (c & 0x3f)
+    }
+    if (need === 2 && (cp < 0x800 || (cp >= 0xd800 && cp <= 0xdfff))) return 'invalid'
+    if (need === 3 && (cp < 0x10000 || cp > 0x10ffff)) return 'invalid'
+    multibyte = true
+    i += need + 1
+  }
+  return multibyte ? 'utf8' : 'ascii'
+}
+
+/** The measures a scorer compares before and after an operation. */
+export interface TextProfile {
+  length: number
+  printable: number
+  entropy: number
+  english: number
+  words: number
+  spaceRatio: number
+  utf8: Utf8Kind
+}
+
+export function profileBytes(bytes: Uint8Array): TextProfile {
+  let spaces = 0
+  for (let i = 0; i < bytes.length; i++) if (bytes[i] === 0x20) spaces++
+  return {
+    length: bytes.length,
+    printable: printableRatio(bytes),
+    entropy: shannonEntropy(bytes),
+    english: englishScore(bytes),
+    words: wordHits(bytes),
+    spaceRatio: bytes.length ? spaces / bytes.length : 0,
+    utf8: utf8Kind(bytes),
+  }
+}
+
 // ---------------------------------------------------------------------------
 // checksums
 // ---------------------------------------------------------------------------

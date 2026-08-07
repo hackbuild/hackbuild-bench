@@ -3,6 +3,7 @@ import { computed, ref } from 'vue'
 import { HbButton, HbIcon, HbModal } from '@virgilvox/hackbuild-ui'
 import type { IconName } from '@virgilvox/hackbuild-ui'
 import { DRIVERS } from '@/core/drivers/registry'
+import { useDemoMode } from '@/composables/useDemoMode'
 import { transportSupport } from '@/core/transport/support'
 import { useDevices } from '@/stores/devices'
 import { useBench } from '@/stores/bench'
@@ -13,6 +14,7 @@ import type { TransportKind } from '@/core/types'
 const devices = useDevices()
 const bench = useBench()
 const dialog = useConnectDialog()
+const demo = useDemoMode()
 
 const support = transportSupport()
 const expanded = ref<string | null>(null)
@@ -28,6 +30,18 @@ function blockedReason(d: DeviceDriver): string {
     .map((t) => support[t].reason)
     .filter((r): r is string => Boolean(r))
   return reasons[0] ?? 'this browser does not expose the api this device needs'
+}
+
+/**
+ * A caveat that applies even when the transport is usable, such as an https
+ * page being unable to call a plain http appliance.
+ */
+function caveat(d: DeviceDriver): string | null {
+  for (const t of d.descriptor.transports) {
+    const s = support[t]
+    if (s.available && s.reason) return s.reason
+  }
+  return null
 }
 
 function firstTransport(d: DeviceDriver): TransportKind {
@@ -54,6 +68,11 @@ async function go(d: DeviceDriver, transport: TransportKind): Promise<void> {
     dialog.close()
     expanded.value = null
   }
+}
+
+async function startDemo(): Promise<void> {
+  await demo.enable()
+  dialog.close()
 }
 
 const sorted = computed(() =>
@@ -98,6 +117,14 @@ const sorted = computed(() =>
           <span class="bn-chipx">{{ d.descriptor.transports.join(' or ') }}</span>
         </button>
 
+        <p
+          v-if="expanded === d.descriptor.kind && caveat(d)"
+          class="bn-note"
+          style="margin: 6px 0 0"
+        >
+          {{ caveat(d) }}
+        </p>
+
         <div
           v-if="expanded === d.descriptor.kind && d.descriptor.accessFields"
           class="bn-capcard"
@@ -132,6 +159,10 @@ const sorted = computed(() =>
     </div>
 
     <template #footer>
+      <HbButton :loading="demo.busy.value" @click="startDemo">
+        <template #icon><HbIcon name="flask" /></template>
+        {{ demo.on.value ? 'demo mode is on' : 'no hardware, use demo mode' }}
+      </HbButton>
       <HbButton @click="dialog.close()">done</HbButton>
     </template>
   </HbModal>

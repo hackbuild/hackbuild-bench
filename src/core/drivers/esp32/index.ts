@@ -3,31 +3,24 @@ import { CAPABILITIES } from '../../capabilities'
 import type { DeviceDescriptor, TransportKind } from '../../types'
 import type { DeviceDriver, DeviceHandle, DeviceSession, DriverContext } from '../types'
 import { COMMON_BAUDS, SerialPortHandle, scorePrintable } from '../../transport/webserial'
-import type { PinMode } from './protocol'
-import { encodeI2cScan, encodePin, encodeServo, isI2cScanDone, parseI2cAddress } from './protocol'
 
 /**
- * ESP32 over Web Serial. A general board that stands in for gear you do not
- * have: a serial console, a set of gpio you can drive, an i2c bus you can
- * scan, and a flash you can rewrite.
+ * ESP32 over Web Serial. A serial console with auto baud, and the modem line
+ * dance that drops the chip into its bootloader so flash can be rewritten.
  *
- * The pin, servo, and i2c calls speak the line protocol in protocol.ts, which
- * the board must be running. The console works against any board.
+ * Pins, i2c, and servos are not here. Whatever sketch the board is running
+ * decides what a line of text means, so there is nothing honest to offer until
+ * the board runs a protocol the bench knows. Flash conduyt and the board comes
+ * back as a conduyt device with a real pin grid.
  */
 
 const descriptor: DeviceDescriptor = {
   kind: 'esp32',
   name: 'ESP32',
-  blurb: 'a board that fills in for gear you do not have',
+  blurb: 'serial console and flash, pin control comes from flashing conduyt',
   icon: 'microchip',
   transports: ['webserial'],
-  capabilities: [
-    CAPABILITIES.SERIAL_CONSOLE,
-    CAPABILITIES.GPIO_DRIVE,
-    CAPABILITIES.BUS_READ,
-    CAPABILITIES.BUS_DRIVE,
-    CAPABILITIES.FLASH_PROGRAM,
-  ],
+  capabilities: [CAPABILITIES.SERIAL_CONSOLE, CAPABILITIES.FLASH_PROGRAM],
   params: [
     {
       key: 'baud',
@@ -69,7 +62,6 @@ class Esp32Session implements DeviceSession {
   private emitting = false
   private closed = false
   private loopAbort: AbortController | null = null
-  private lineHandlers = new Set<(line: string) => void>()
 
   constructor(port: SerialPortHandle, ctx: DriverContext, baud: number) {
     this.port = port
@@ -85,13 +77,7 @@ class Esp32Session implements DeviceSession {
   }
 
   getCapabilities(): Capability[] {
-    return [
-      CAPABILITIES.SERIAL_CONSOLE,
-      CAPABILITIES.GPIO_DRIVE,
-      CAPABILITIES.BUS_READ,
-      CAPABILITIES.BUS_DRIVE,
-      CAPABILITIES.FLASH_PROGRAM,
-    ]
+    return [CAPABILITIES.SERIAL_CONSOLE, CAPABILITIES.FLASH_PROGRAM]
   }
 
   getInfo(): Record<string, string> {
@@ -178,51 +164,6 @@ class Esp32Session implements DeviceSession {
     return best
   }
 
-  /** Configure or drive a gpio. Consequential, so it needs gpio drive armed. */
-  async setPin(pin: number, mode: PinMode, value: number): Promise<void> {
-    if (!this.ctx.isArmed(CAPABILITIES.GPIO_DRIVE)) {
-      throw new Error('gpio drive is not armed. arm gpio drive to set a pin.')
-    }
-    const cmd = encodePin(pin, mode, value)
-    await this.port.write(cmd)
-    this.emitLine(cmd.trimEnd(), 'tx')
-  }
-
-  /** Probe the i2c bus. A read, so no arming. Returns the addresses found. */
-  async scanI2c(): Promise<number[]> {
-    const addrs: number[] = []
-    const done = new Promise<void>((resolve) => {
-      const handler = (line: string): void => {
-        const addr = parseI2cAddress(line)
-        if (addr !== null) addrs.push(addr)
-        if (isI2cScanDone(line)) {
-          clearTimeout(timer)
-          this.lineHandlers.delete(handler)
-          resolve()
-        }
-      }
-      const timer = setTimeout(() => {
-        this.lineHandlers.delete(handler)
-        resolve()
-      }, 3000)
-      this.lineHandlers.add(handler)
-    })
-    await this.port.write(encodeI2cScan())
-    this.emitLine('I2C SCAN', 'tx')
-    await done
-    return addrs
-  }
-
-  /** Move a servo. Drives a pin, so it needs gpio drive armed. */
-  async setServo(pin: number, degrees: number): Promise<void> {
-    if (!this.ctx.isArmed(CAPABILITIES.GPIO_DRIVE)) {
-      throw new Error('gpio drive is not armed. arm gpio drive to move a servo.')
-    }
-    const cmd = encodeServo(pin, degrees)
-    await this.port.write(cmd)
-    this.emitLine(cmd.trimEnd(), 'tx')
-  }
-
   /**
    * Drive the modem lines to put the chip in the serial bootloader. This is the
    * classic auto reset sequence: RTS toggles EN, DTR toggles GPIO0. Entering
@@ -261,7 +202,6 @@ class Esp32Session implements DeviceSession {
 
   private onLine(line: string): void {
     if (this.emitting) this.emitLine(line, 'rx')
-    for (const h of [...this.lineHandlers]) h(line)
   }
 
   private emitLine(text: string, stream: 'rx' | 'tx' | 'note'): void {

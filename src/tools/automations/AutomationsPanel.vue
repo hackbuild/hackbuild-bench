@@ -62,6 +62,7 @@ const sources = computed(() => devices.nodes.map((n) => ({ id: n.id, label: n.la
           <span class="bn-sw"><i></i></span>{{ rule.enabled ? 'armed' : 'off' }}
         </button>
         <span class="bn-chipx">fired {{ rule.fired }}</span>
+        <span v-if="rule.lastError" class="bn-trk">{{ rule.lastError }}</span>
         <button type="button" class="bn-tinyact" @click="rules.remove(rule.id)">delete</button>
       </div>
     </div>

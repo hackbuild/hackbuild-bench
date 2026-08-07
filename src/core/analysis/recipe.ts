@@ -692,6 +692,17 @@ export function operation(id: string): Operation | undefined {
 }
 
 /**
+ * A step with every declared argument present. Callers that build steps from a
+ * search result only carry the arguments that mattered to the search, and the
+ * editor needs a value in every field it renders.
+ */
+export function makeStep(opId: string, args: Record<string, unknown> = {}): RecipeStep {
+  const op = BY_ID.get(opId)
+  const defaults = op ? Object.fromEntries(op.args.map((a) => [a.key, a.default])) : {}
+  return { opId, args: { ...defaults, ...args } }
+}
+
+/**
  * Run the chain. Never throws: a failing step stops the chain and the partial
  * output comes back with the message, so the editor can show how far it got.
  */

@@ -16,7 +16,14 @@ export interface Rule {
   condition: RuleClause & { minGapMs?: number }
   action: RuleClause & { deviceId?: string }
   lastFiredAt: number
+  /** What the rule does when it fires. Rules built by a playbook carry one. */
+  perform?: () => Promise<void>
+  /** Set when the last action failed, so the row can say why. */
+  lastError?: string
 }
+
+/** A rule as a builder hands it over, before it gets an id and its counters. */
+export type RuleDraft = Omit<Rule, 'id' | 'enabled' | 'fired' | 'lastFiredAt' | 'lastError'>
 
 /**
  * Trigger, condition, action rules over the device bus.
@@ -39,6 +46,16 @@ export const useAutomations = defineStore('automations', () => {
 
       rule.lastFiredAt = Date.now()
       rule.fired++
+      if (rule.perform) {
+        void rule.perform().then(
+          () => {
+            rule.lastError = undefined
+          },
+          (err: unknown) => {
+            rule.lastError = err instanceof Error ? err.message : String(err)
+          },
+        )
+      }
     }
   })
 
@@ -71,6 +88,50 @@ export const useAutomations = defineStore('automations', () => {
     ]
   }
 
+  /** Builds a rule straight from a captured artifact and an action device. */
+  function addForArtifact(
+    sourceId: string,
+    match: string,
+    actionDeviceId: string,
+    actionLabel: string,
+  ): void {
+    const source = bus.node(sourceId)
+    rules.value = [
+      ...rules.value,
+      {
+        id: `rule-${++counter}`,
+        enabled: false,
+        fired: 0,
+        lastFiredAt: 0,
+        trigger: {
+          kind: 'this frame seen again',
+          detail: `${match} on ${source?.label ?? sourceId}`,
+          deviceId: sourceId,
+          match,
+        },
+        condition: { kind: 'rate limit', detail: 'once every 2 s', minGapMs: 2000 },
+        action: {
+          kind: 'drive a pin',
+          detail: `pulse a pin on ${actionLabel}`,
+          deviceId: actionDeviceId,
+        },
+      },
+    ]
+  }
+
+  /** Adds a rule a builder assembled. Off until the user switches it on. */
+  function addRule(draft: RuleDraft): Rule {
+    const rule: Rule = {
+      id: `rule-${++counter}`,
+      enabled: false,
+      fired: 0,
+      lastFiredAt: 0,
+      ...draft,
+    }
+    rules.value = [...rules.value, rule]
+    return rule
+  }
+
   function toggle(id: string): void {
     const r = rules.value.find((x) => x.id === id)
     if (r) r.enabled = !r.enabled
@@ -80,5 +141,5 @@ export const useAutomations = defineStore('automations', () => {
     rules.value = rules.value.filter((r) => r.id !== id)
   }
 
-  return { rules, addBlank, toggle, remove }
+  return { rules, addBlank, addForArtifact, addRule, toggle, remove }
 })

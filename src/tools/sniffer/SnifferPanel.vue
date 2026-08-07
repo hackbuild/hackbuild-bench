@@ -3,6 +3,7 @@ import { computed, onBeforeUnmount, ref } from 'vue'
 import { HbButton, HbIcon } from '@virgilvox/hackbuild-ui'
 import InstPacketList from '@/components/instruments/InstPacketList.vue'
 import InstHexView from '@/components/instruments/InstHexView.vue'
+import ArtifactOffers from '@/components/bench/ArtifactOffers.vue'
 import { useDevices } from '@/stores/devices'
 import { useBench } from '@/stores/bench'
 import { useDeviceStream } from '@/composables/useDeviceStream'
@@ -60,12 +61,6 @@ function pick(id: string): void {
   selected.value = shown.value.find((p) => p.id === id)?.raw ?? null
 }
 
-function sendToAnalysis(): void {
-  if (selected.value) {
-    bench.sendToAnalysis(selected.value.summary ?? 'packet', selected.value.bytes)
-  }
-}
-
 onBeforeUnmount(() => {
   if (streaming.value) void devices.stop(props.deviceId).catch(() => undefined)
 })
@@ -116,12 +111,7 @@ onBeforeUnmount(() => {
         <span class="bn-v">{{ toHex(selected.bytes) }}</span>
       </div>
       <InstHexView v-if="bench.advanced" :bytes="selected.bytes" />
-      <div class="bn-acts" style="margin-top: 10px">
-        <HbButton size="sm" @click="sendToAnalysis">
-          <template #icon><HbIcon name="wand" /></template>
-          send to analysis
-        </HbButton>
-      </div>
+      <ArtifactOffers :artifact="selected" />
     </div>
   </div>
 </template>
