@@ -47,6 +47,10 @@ function pct(v: number): string {
   return `${Math.round(v * 100)}%`
 }
 
+function times(n: number): string {
+  return n === 1 ? 'once' : `${n} times`
+}
+
 function iqProvider(ctx: PlaybookContext) {
   const dev = ctx.provider(CAPABILITIES.CAPTURE_IQ)
   if (!dev) throw new Error('nothing on the bench can record raw radio samples right now.')
@@ -219,12 +223,12 @@ const copyARemote: Playbook = {
         if (!f) return []
         return [
           `${f.modulation.kind} at ${pct(f.modulation.confidence)} confidence`,
-          `${f.bitLength} bits, sent ${f.repeats} times in the capture`,
+          `${f.bitLength} bits, sent ${times(f.repeats)} in the capture`,
           `about ${Math.round(f.symbolRateHz)} symbols per second`,
           f.preamble
-            ? `starts with ${f.preamble.pattern} repeated ${f.preamble.repeats} times`
+            ? `starts with ${f.preamble.pattern} repeated ${times(f.preamble.repeats)}`
             : 'no repeating pattern at the head',
-          `bits ${bitsToString(f.bits)}`,
+          `bits ${bitsToString(f.bits, 48)}`,
           f.modulation.note,
         ]
       },
@@ -244,6 +248,15 @@ const copyARemote: Playbook = {
         ctx.set('confirmed', true)
         ctx.log(`frame accepted: ${toHex(f.bytes)}`)
       },
+      summary: (ctx) => {
+        const f = ctx.get<ParsedFrame>('frame')
+        if (!f) return []
+        return [
+          `${f.bitLength} bits of ${f.modulation.kind}, sent ${times(f.repeats)}`,
+          `bits ${bitsToString(f.bits)}`,
+        ]
+      },
+      bytes: (ctx) => ctx.get<ParsedFrame>('frame')?.bytes ?? null,
     },
     {
       id: 'replay',
@@ -267,18 +280,19 @@ const copyARemote: Playbook = {
         const hz = ctx.get<number>('tunedHz') ?? 433.92e6
         await tuneTo(ctx, dev.id, hz)
         const session = ctx.session<FrameTransmitSession>(dev.id)
-        if (!session?.transmit) {
+        const send = session?.replayFrame ?? session?.transmit
+        if (!session || !send) {
           throw new Error(
             `${dev.label} has no frame transmit path in its driver, only a bare carrier. nothing was sent.`,
           )
         }
-        await session.transmit(frame.bytes, { centerHz: hz, repeats: Math.max(3, frame.repeats) })
+        await send.call(session, frame.bytes)
         ctx.set('sentCount', (ctx.get<number>('sentCount') ?? 0) + 1)
         ctx.log(`sent ${frame.bytes.length} bytes on ${formatHz(hz)}: ${toHex(frame.bytes)}`)
       },
       summary: (ctx) => {
         const n = ctx.get<number>('sentCount') ?? 0
-        return n ? [`sent ${n} time${n === 1 ? '' : 's'}`] : []
+        return n ? [`sent ${times(n)}`] : []
       },
       bytes: (ctx) => ctx.get<ParsedFrame>('frame')?.bytes ?? null,
     },
@@ -763,7 +777,7 @@ const whatIsThisSignal: Playbook = {
         ctx.set('sync', result)
         ctx.log(
           pre
-            ? `head is ${pre.pattern} repeated ${pre.repeats} times`
+            ? `head is ${pre.pattern} repeated ${times(pre.repeats)}`
             : 'no repeating head, the payload starts at the first bit',
         )
       },
@@ -775,7 +789,7 @@ const whatIsThisSignal: Playbook = {
             ? `head pattern ${s.pattern}, ${s.preambleBits} bits of it`
             : 'no repeating head found',
           s.period
-            ? `the stream repeats every ${s.period} bits, ${s.repeats} times over`
+            ? `the stream repeats every ${s.period} bits, ${times(s.repeats)} over`
             : 'the stream does not repeat inside this capture',
         ]
       },
@@ -834,7 +848,6 @@ interface TriggerCatch {
 }
 
 interface PinAction {
-  kind: 'pin' | 'servo'
   pin: number
   value: number
 }
@@ -844,17 +857,13 @@ const PIN_ACTIONS: PlaybookChoice[] = [
   { value: 'pin:2:0', label: 'drive pin 2 low', hint: 'pulls the pin to ground' },
   { value: 'pin:4:1', label: 'drive pin 4 high', hint: 'a relay or a buzzer usually lands here' },
   { value: 'pin:5:1', label: 'drive pin 5 high', hint: 'spare output' },
+  { value: 'pin:12:1', label: 'drive pin 12 high', hint: 'spare output' },
   { value: 'pin:13:1', label: 'drive pin 13 high', hint: 'the onboard led on many boards' },
-  { value: 'servo:13:90', label: 'move a servo on pin 13 to 90', hint: 'needs a servo wired to pin 13' },
 ]
 
 function parsePinAction(value: string): PinAction {
-  const [kind, pin, level] = value.split(':')
-  return {
-    kind: kind === 'servo' ? 'servo' : 'pin',
-    pin: Number(pin),
-    value: Number(level),
-  }
+  const [, pin, level] = value.split(':')
+  return { pin: Number(pin), value: Number(level) }
 }
 
 function pinActionLabel(value: string): string {
@@ -868,13 +877,6 @@ async function drivePin(ctx: PlaybookContext, deviceId: string, action: PinActio
   const session = ctx.session<PinDriveSession>(deviceId)
   if (!session) throw new Error('that board is no longer on the bench.')
 
-  if (action.kind === 'servo') {
-    if (!session.setServo) {
-      throw new Error('that board has no servo path in its driver. pick a pin instead.')
-    }
-    await session.setServo(action.pin, action.value)
-    return
-  }
   if (session.writePin) {
     await session.setPinMode?.(action.pin, 'output')
     await session.writePin(action.pin, action.value)

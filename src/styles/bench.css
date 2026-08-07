@@ -1928,6 +1928,289 @@ canvas {
   justify-content: center;
 }
 
+/* ---- widget dashboard --------------------------------------------------- */
+
+.bn-addbar {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+  border: var(--hb-border) solid var(--hb-ink);
+  background: var(--hb-paper-raised);
+  padding: var(--hb-s2) 10px;
+  margin-bottom: 12px;
+  max-width: 100%;
+}
+.bn-addbar .bn-addlab {
+  font-family: var(--hb-utility);
+  font-size: 10px;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--hb-ink-3);
+  margin-right: var(--hb-s2);
+}
+.bn-addbar .bn-push {
+  flex: 1 1 auto;
+}
+
+.bn-wgrid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(min(248px, 100%), 1fr));
+  gap: 10px;
+}
+.bn-wcard {
+  border: var(--hb-border) solid var(--hb-ink);
+  background: var(--hb-paper-raised);
+  box-shadow: var(--hb-shadow);
+  padding: 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+}
+.bn-wcard.is-live {
+  border-color: var(--hb-pink);
+}
+.bn-wcard .bn-wh {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--hb-s2);
+}
+.bn-wkind {
+  font-family: var(--hb-utility);
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--hb-ink-3);
+}
+.bn-wx {
+  border: var(--hb-border) solid var(--hb-ink-3);
+  background: transparent;
+  color: var(--hb-ink-3);
+  font-family: var(--hb-utility);
+  font-size: 9px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  padding: 2px 6px;
+  flex: 0 0 auto;
+}
+.bn-wtitle {
+  font-family: var(--hb-utility);
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--hb-ink);
+  background: var(--hb-paper-sunk);
+  border: 1px solid var(--hb-paper-edge);
+  padding: 4px 6px;
+  width: 100%;
+  min-width: 0;
+}
+.bn-wpin {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+.bn-wpin label {
+  font-family: var(--hb-utility);
+  font-size: 9px;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--hb-ink-3);
+  flex: 0 0 auto;
+}
+.bn-wpin select {
+  flex: 1 1 auto;
+  min-width: 0;
+  font-family: var(--hb-readout);
+  font-size: 15px;
+  border: var(--hb-border) solid var(--hb-ink);
+  background: var(--hb-paper-raised);
+  color: var(--hb-ink);
+  padding: 2px 4px;
+}
+.bn-wbody {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  min-height: 98px;
+  background: var(--hb-paper-sunk);
+  border: 1px solid var(--hb-paper-edge);
+  padding: 10px;
+  min-width: 0;
+}
+.bn-wfoot {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--hb-s2);
+  border-top: 1px solid var(--hb-paper-edge);
+  padding-top: 5px;
+  font-family: var(--hb-utility);
+  font-size: 9px;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--hb-ink-3);
+}
+.bn-wfoot b {
+  font-family: var(--hb-readout);
+  font-size: 15px;
+  letter-spacing: 0;
+  font-weight: 400;
+  color: var(--hb-pink);
+}
+
+.bn-wsw {
+  position: relative;
+  display: block;
+  width: 100%;
+  max-width: 156px;
+  height: 44px;
+  padding: 0;
+  border: var(--hb-border) solid var(--hb-ink);
+  background: var(--hb-paper-raised);
+}
+.bn-wsw i {
+  position: absolute;
+  top: 3px;
+  left: 3px;
+  width: calc(50% - 3px);
+  height: calc(100% - 6px);
+  background: var(--hb-ink);
+  transition: left var(--hb-t) ease;
+}
+.bn-wsw.is-on i {
+  left: 50%;
+  background: var(--hb-pink);
+}
+.bn-wsw span {
+  position: absolute;
+  top: 0;
+  width: 50%;
+  height: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-family: var(--hb-utility);
+  font-size: 10px;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--hb-paper);
+}
+.bn-wsw span.is-lo {
+  left: 0;
+}
+.bn-wsw span.is-hi {
+  right: 0;
+  color: var(--hb-ink-4);
+}
+.bn-wsw.is-on span.is-lo {
+  color: var(--hb-ink-4);
+}
+.bn-wsw.is-on span.is-hi {
+  color: var(--hb-paper);
+}
+.bn-wsw:disabled {
+  border-color: var(--hb-ink-4);
+}
+
+.bn-wpress {
+  width: 100%;
+  max-width: 156px;
+  height: 58px;
+  border: var(--hb-border) solid var(--hb-ink);
+  background: var(--hb-paper-raised);
+  box-shadow: var(--hb-shadow);
+  font-family: var(--hb-utility);
+  font-size: 12px;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  color: var(--hb-ink);
+  touch-action: none;
+  user-select: none;
+}
+.bn-wpress.is-down {
+  background: var(--hb-pink);
+  color: var(--hb-paper);
+  border-color: var(--hb-pink);
+  box-shadow: none;
+  transform: translate(3px, 3px);
+}
+
+.bn-wslide {
+  width: 100%;
+  min-width: 0;
+}
+.bn-wslide input[type='range'] {
+  width: 100%;
+  accent-color: var(--hb-pink);
+}
+.bn-wscale {
+  display: flex;
+  justify-content: space-between;
+  font-family: var(--hb-utility);
+  font-size: 9px;
+  color: var(--hb-ink-4);
+}
+.bn-wnum {
+  font-family: var(--hb-readout);
+  font-size: 30px;
+  line-height: 1;
+  color: var(--hb-pink);
+}
+
+.bn-wled {
+  width: 46px;
+  height: 46px;
+  border: var(--hb-border) solid var(--hb-ink);
+  background: var(--hb-void);
+}
+.bn-wled.is-on {
+  background: var(--hb-slime);
+}
+
+.bn-wbar {
+  width: 100%;
+  height: 12px;
+  border: var(--hb-border) solid var(--hb-ink);
+  background: var(--hb-void);
+}
+.bn-wbar i {
+  display: block;
+  height: 100%;
+  background: var(--hb-slime);
+}
+
+.bn-wscope {
+  width: 100%;
+  height: 84px;
+}
+.bn-wscope canvas {
+  height: 100%;
+}
+.bn-wread {
+  display: flex;
+  gap: var(--hb-s3);
+  flex-wrap: wrap;
+  justify-content: center;
+  font-family: var(--hb-utility);
+  font-size: 9px;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--hb-ink-3);
+}
+.bn-wread b {
+  font-family: var(--hb-readout);
+  font-size: 14px;
+  letter-spacing: 0;
+  font-weight: 400;
+  color: var(--hb-pink);
+}
+
 /* ---- responsive --------------------------------------------------------- */
 
 @media (max-width: 1100px) {
@@ -2108,6 +2391,32 @@ canvas {
   }
 }
 
+/* phone width: drop the record button and let the mode toggle carry the row. */
+@media (max-width: 560px) {
+  .bn-rec {
+    display: none;
+  }
+  .bn-wordmark {
+    font-size: 16px;
+  }
+  .bn-meta,
+  .bn-reads {
+    gap: var(--hb-s3);
+  }
+  .bn-meta .bn-v {
+    font-size: 16px;
+  }
+  .bn-read .bn-v {
+    font-size: 20px;
+  }
+  .bn-grid2 {
+    grid-template-columns: 1fr;
+  }
+  .bn-statgrid {
+    grid-template-columns: repeat(2, 1fr);
+  }
+}
+
 /* touch targets get taller on coarse pointers so buttons are tappable. */
 @media (pointer: coarse) {
   .bn-subtab,
@@ -2115,12 +2424,22 @@ canvas {
   .bn-pack,
   .bn-tinyact,
   .bn-seg2 button,
-  .bn-toggle {
+  .bn-toggle,
+  .bn-wx {
     min-height: 40px;
   }
   .bn-list .bn-row {
     padding-top: var(--hb-s2);
     padding-bottom: var(--hb-s2);
+  }
+  /* the range and select controls need real height for a finger. */
+  .bn-knob input[type='range'] {
+    height: 28px;
+  }
+  .bn-knob select,
+  .bn-knob input[type='text'],
+  .bn-knob input[type='number'] {
+    min-height: 40px;
   }
 }
 

@@ -119,7 +119,8 @@ export interface PlaybookContext {
 // ---------------------------------------------------------------------------
 
 export interface FrameTransmitSession extends DeviceSession {
-  transmit?(bytes: Uint8Array, opts?: { centerHz?: number; repeats?: number }): Promise<void>
+  replayFrame?(bytes: Uint8Array): Promise<void>
+  transmit?(bytes: Uint8Array): Promise<void>
 }
 
 export interface GattCharacteristic {
@@ -150,8 +151,7 @@ export interface GattSession extends DeviceSession {
 }
 
 export interface PinDriveSession extends DeviceSession {
-  setPin?(pin: number, mode: string, value?: number): Promise<void>
   setPinMode?(pin: number, mode: string): Promise<void>
   writePin?(pin: number, value: number): Promise<void>
-  setServo?(pin: number, degrees: number): Promise<void>
+  setPin?(pin: number, mode: string, value?: number): Promise<void>
 }

@@ -217,6 +217,21 @@ function stepDisabled(s: StepStatus): boolean {
             <span v-else-if="s.step.manual" class="bn-chipx">your turn</span>
           </div>
 
+          <div
+            v-if="s.complete && !s.current && summaryFor(s.step).length"
+            class="bn-op"
+            style="align-items: flex-start"
+          >
+            <span class="bn-n"></span>
+            <span class="bn-t" style="font-weight: 400; color: var(--hb-ink-3)">
+              <span
+                v-for="(line, i) in summaryFor(s.step)"
+                :key="i"
+                style="display: block"
+              >{{ line }}</span>
+            </span>
+          </div>
+
           <div v-if="s.current" class="bn-capcard">
             <p class="bn-note" style="margin-top: 0">{{ s.step.detail }}</p>
 

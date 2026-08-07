@@ -3,6 +3,7 @@ import { computed, onBeforeUnmount, ref, shallowRef, watch } from 'vue'
 import { HbButton, HbIcon } from '@virgilvox/hackbuild-ui'
 import InstSmeter from '@/components/instruments/InstSmeter.vue'
 import InstScope from '@/components/instruments/InstScope.vue'
+import TrunkView from './TrunkView.vue'
 import { Scanner } from '@/core/scanner/engine'
 import type { ScanCall, ScanEntry, ScanState } from '@/core/scanner/engine'
 import { CHANNEL_GROUPS, SERVICE_LABELS } from '@/core/scanner/conventional'
@@ -22,6 +23,7 @@ const stream = useDeviceStream(props.deviceId)
 const rx = useReceiver(props.deviceId)
 const ears = useTranscription(props.deviceId)
 
+const mode = ref<'conventional' | 'trunked'>('conventional')
 const selectedGroups = ref<string[]>(['weather', 'interop'])
 const threshold = ref(-70)
 const running = ref(false)
@@ -125,6 +127,18 @@ onBeforeUnmount(() => {
 
 <template>
   <div>
+    <div class="bn-seg2" style="margin-bottom: 12px">
+      <button type="button" :class="{ 'is-on': mode === 'conventional' }" @click="mode = 'conventional'">
+        conventional
+      </button>
+      <button type="button" :class="{ 'is-on': mode === 'trunked' }" @click="mode = 'trunked'">
+        trunked
+      </button>
+    </div>
+
+    <TrunkView v-if="mode === 'trunked'" :device-id="deviceId" />
+
+    <div v-else>
     <p class="bn-note" style="margin-top: 0">
       pick what you want to hear, press listen, and the receiver walks the list and stops
       on whatever is talking. these channels are the same everywhere in the country. your
@@ -263,5 +277,6 @@ onBeforeUnmount(() => {
       caption, which makes a busy channel readable at a glance.
       <span v-if="ears.ready.value"> it is on now.</span>
     </p>
+    </div>
   </div>
 </template>
