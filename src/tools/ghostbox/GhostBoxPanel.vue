@@ -20,6 +20,19 @@ const devices = useDevices()
 const rx = useReceiver(props.deviceId)
 const ears = useTranscription(props.deviceId)
 
+/**
+ * The feed alone says nothing while the model is downloading or after it has
+ * failed, which reads as transcription simply being absent.
+ */
+const earsTag = computed(() => {
+  if (!throughEars.value) return 'off, turn on through ears'
+  if (ears.error.value) return ears.error.value
+  if (ears.loading.value) return `downloading the model, ${ears.progress.value}%`
+  if (!ears.ready.value) return 'starting'
+  if (!ears.lines.value.length) return `${ears.status.value}, nothing caught yet`
+  return `${ears.model.value}  ${ears.backend.value}`
+})
+
 const bandId = ref('fm')
 const direction = ref<SweepDirection>('up')
 const dwellMs = ref(120)
@@ -189,6 +202,12 @@ onBeforeUnmount(() => {
     <InstWordCloud :words="cloud" @pick="retune" />
 
     <div class="bn-subhead" style="margin-top: 14px">the feed</div>
+    <div class="bn-subhead" style="display: flex; gap: 8px; align-items: baseline">
+      ears
+      <span class="bn-tag" :style="ears.error.value ? 'color:var(--hb-lit-warn)' : ''">
+        {{ earsTag }}
+      </span>
+    </div>
     <InstEvpFeed :lines="ears.lines.value" />
 
     <p class="bn-note">

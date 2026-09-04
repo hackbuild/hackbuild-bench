@@ -5,32 +5,75 @@
 
 export type DemodMode = 'fm' | 'nfm' | 'am' | 'usb' | 'lsb' | 'raw'
 
-/** Simple integer decimator with a moving average anti-alias, cheap and good
- * enough for voice bandwidth work. */
-export class Decimator {
-  private factor: number
+/**
+ * Shifts a slice of the window down to baseband and decimates onto it, in one
+ * pass over the samples.
+ *
+ * The mix is a recursive rotation rather than a trig call per sample, which
+ * matters when the input is ten million samples a second. Rounding walks the
+ * rotor off the unit circle, so it is renormalised periodically.
+ */
+export class Downconverter {
+  private factor = 1
   private accI = 0
   private accQ = 0
   private count = 0
+  private cos = 1
+  private sin = 0
+  private stepCos = 1
+  private stepSin = 0
+  private shifting = false
+  private since = 0
 
-  constructor(factor: number) {
-    this.factor = Math.max(1, Math.floor(factor))
+  /** `offsetHz` is where in the window to listen, relative to its centre. */
+  configure(factor: number, offsetHz: number, sampleRate: number): void {
+    const next = Math.max(1, Math.floor(factor))
+    if (next !== this.factor) {
+      this.factor = next
+      this.accI = this.accQ = this.count = 0
+    }
+    // mixing down by the offset puts the wanted signal at zero.
+    const w = (-2 * Math.PI * offsetHz) / sampleRate
+    this.stepCos = Math.cos(w)
+    this.stepSin = Math.sin(w)
+    this.shifting = offsetHz !== 0
+    if (!this.shifting) {
+      this.cos = 1
+      this.sin = 0
+    }
   }
 
-  setFactor(factor: number): void {
-    this.factor = Math.max(1, Math.floor(factor))
-    this.accI = this.accQ = this.count = 0
-  }
-
-  /** Returns interleaved IQ at rate/factor. */
   process(iq: Float32Array): Float32Array {
-    if (this.factor === 1) return iq
+    if (!this.shifting && this.factor === 1) return iq
     const outLen = Math.floor(iq.length / 2 / this.factor) * 2
     const out = new Float32Array(outLen)
     let o = 0
+    let c = this.cos
+    let s = this.sin
+    const sc = this.stepCos
+    const ss = this.stepSin
+    const shifting = this.shifting
+
     for (let i = 0; i < iq.length; i += 2) {
-      this.accI += iq[i]
-      this.accQ += iq[i + 1]
+      let ri = iq[i]
+      let rq = iq[i + 1]
+      if (shifting) {
+        const mi = ri * c - rq * s
+        const mq = ri * s + rq * c
+        ri = mi
+        rq = mq
+        const nc = c * sc - s * ss
+        s = c * ss + s * sc
+        c = nc
+        if (++this.since >= 1024) {
+          this.since = 0
+          const n = Math.hypot(c, s) || 1
+          c /= n
+          s /= n
+        }
+      }
+      this.accI += ri
+      this.accQ += rq
       if (++this.count === this.factor) {
         if (o + 1 < outLen) {
           out[o++] = this.accI / this.factor
@@ -39,6 +82,8 @@ export class Decimator {
         this.accI = this.accQ = this.count = 0
       }
     }
+    this.cos = c
+    this.sin = s
     return out.subarray(0, o)
   }
 }
@@ -190,12 +235,29 @@ export class Agc {
   }
 }
 
+/** Nothing useful survives a slice narrower than this. */
+const MIN_BANDWIDTH = 500
+
+/** What each mode listens through when nothing else is asked for. */
+export const MODE_BANDWIDTH: Record<DemodMode, number> = {
+  fm: 200000,
+  nfm: 12500,
+  am: 10000,
+  usb: 2700,
+  lsb: 2700,
+  raw: 200000,
+}
+
+function clampRange(v: number, lo: number, hi: number): number {
+  return Math.max(lo, Math.min(hi, v))
+}
+
 /**
- * The full receive chain: decimate, demodulate, filter, resample, level.
+ * The full receive chain: shift, decimate, demodulate, filter, resample, level.
  * One instance per listening device.
  */
 export class ReceiveChain {
-  private decim = new Decimator(1)
+  private down = new Downconverter()
   private fm = new FmDemod()
   private am = new AmDemod()
   private usb = new SsbDemod(true)
@@ -205,27 +267,72 @@ export class ReceiveChain {
   private agc = new Agc()
   private mode: DemodMode = 'fm'
   private outRate = 48000
-  private ifRate = 256000
+  private ifRate = 200000
+  private inputRate = 0
+  private offset = 0
+  private bandwidth = MODE_BANDWIDTH.fm
 
   constructor(outRate = 48000) {
     this.outRate = outRate
     this.lp = new LowPass(8000, this.ifRate)
   }
 
-  configure(mode: DemodMode, inputRate: number): void {
+  configure(mode: DemodMode, inputRate: number, bandwidthHz?: number): void {
     this.mode = mode
-    const wantIf = mode === 'fm' ? 256000 : 48000
-    const factor = Math.max(1, Math.round(inputRate / wantIf))
-    this.ifRate = inputRate / factor
-    this.decim.setFactor(factor)
-    this.fm.configure(mode === 'nfm' ? 5000 : 75000, this.ifRate)
-    this.lp.configure(mode === 'fm' ? 15000 : 3400, this.ifRate)
+    this.inputRate = inputRate
+    this.bandwidth = bandwidthHz ?? MODE_BANDWIDTH[mode]
+    this.apply()
+  }
+
+  /** Where in the window to listen, in Hz from its centre. */
+  setOffset(hz: number): void {
+    this.offset = hz
+    this.apply()
+  }
+
+  /** How wide a slice to keep. This is the passband the panel draws. */
+  setBandwidth(hz: number): void {
+    this.bandwidth = hz
+    this.apply()
+  }
+
+  get offsetHz(): number {
+    return this.offset
+  }
+
+  get bandwidthHz(): number {
+    return this.bandwidth
+  }
+
+  /** How far off centre the offset may go before the passband leaves the window. */
+  maxOffsetHz(): number {
+    return Math.max(0, (this.inputRate - this.bandwidth) / 2)
+  }
+
+  /**
+   * The decimation is the channel filter: what survives it is a slice one
+   * bandwidth wide around the offset. Everything downstream runs at that rate.
+   */
+  private apply(): void {
+    if (!this.inputRate) return
+    this.bandwidth = clampRange(this.bandwidth, MIN_BANDWIDTH, this.inputRate)
+    const limit = this.maxOffsetHz()
+    this.offset = clampRange(this.offset, -limit, limit)
+
+    const factor = Math.max(1, Math.round(this.inputRate / this.bandwidth))
+    this.ifRate = this.inputRate / factor
+    this.down.configure(factor, this.offset, this.inputRate)
+    // deviation only sets the discriminator gain, and the agc follows it.
+    const deviation = this.mode === 'fm' ? 75000 : Math.max(1000, this.bandwidth * 0.4)
+    this.fm.configure(deviation, this.ifRate)
+    const audioCut = Math.min(this.mode === 'fm' ? 15000 : 3400, this.ifRate * 0.45)
+    this.lp.configure(audioCut, this.ifRate)
   }
 
   /** Interleaved IQ in, mono audio at outRate out. */
   process(iq: Float32Array): Float32Array {
     if (this.mode === 'raw') return new Float32Array(0)
-    const base = this.decim.process(iq)
+    const base = this.down.process(iq)
     let audio: Float32Array
     switch (this.mode) {
       case 'fm':

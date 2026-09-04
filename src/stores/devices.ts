@@ -18,8 +18,14 @@ export const useDevices = defineStore('devices', () => {
   const lastError = ref<string | null>(null)
   const logs = ref<Array<{ deviceId: string; message: string; at: number }>>([])
 
+  /**
+   * The bus mutates its nodes in place and knows nothing about Vue, so each
+   * one is copied here. Without the copy a computed that reads a node keeps
+   * the same object identity, never invalidates, and a panel goes on showing
+   * idle while the device streams.
+   */
   function sync(): void {
-    nodes.value = [...bus.nodes]
+    nodes.value = bus.nodes.map((n) => ({ ...n }))
     triggerRef(nodes)
   }
 
@@ -75,8 +81,10 @@ export const useDevices = defineStore('devices', () => {
 
   async function disconnect(id: string): Promise<void> {
     await bus.detach(id)
-    if (focusId.value === id) focusId.value = nodes.value[0]?.id ?? null
+    // sync first, otherwise the next focus is picked out of the old list and
+    // can land on the device that was just removed.
     sync()
+    if (focusId.value === id) focusId.value = nodes.value[0]?.id ?? null
   }
 
   async function configure(id: string, params: Record<string, number>): Promise<void> {

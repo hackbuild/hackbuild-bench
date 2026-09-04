@@ -5,6 +5,9 @@ import InstScope from '@/components/instruments/InstScope.vue'
 import { TrunkFollower } from '@/core/scanner/p25/trunk'
 import type { TrunkCall } from '@/core/scanner/p25/trunk'
 import { DemoControlChannel } from '@/core/scanner/p25/demo'
+import { ControlChannelDecoder } from '@/core/scanner/p25/c4fm'
+import type { C4fmStats } from '@/core/scanner/p25/c4fm'
+import { bus } from '@/core/bus/DeviceBus'
 import { allSystems } from '@/core/scanner/systems'
 import type { RadioSystem } from '@/core/scanner/systems'
 import { SERVICE_LABELS } from '@/core/scanner/conventional'
@@ -28,6 +31,7 @@ const siteIndex = ref(0)
 const running = ref(false)
 const calls = shallowRef<TrunkCall[]>([])
 const identCount = ref(0)
+const lock = ref<C4fmStats | null>(null)
 const serviceFilter = ref<string>('all')
 
 const system = computed<RadioSystem | undefined>(() => systems.find((s) => s.id === systemId.value))
@@ -36,6 +40,8 @@ const controlHz = computed(() => site.value?.controlHz[0] ?? 0)
 
 let follower: TrunkFollower | null = null
 let demo: DemoControlChannel | null = null
+let decoder: ControlChannelDecoder | null = null
+let unsubscribe: (() => void) | null = null
 let feedTimer: ReturnType<typeof setInterval> | null = null
 let ageTimer: ReturnType<typeof setInterval> | null = null
 
@@ -64,8 +70,13 @@ async function start(): Promise<void> {
   })
   follower.setCenter(controlHz.value)
 
-  await devices.configure(props.deviceId, { centerHz: controlHz.value })
-  await devices.start(props.deviceId, isDemo.value ? 'iq' : 'spectrum')
+  // one narrow channel is all this needs, and a low rate keeps the decoder
+  // ahead of the samples.
+  await devices.configure(props.deviceId, {
+    centerHz: controlHz.value,
+    ...(isDemo.value ? {} : { sampleRate: 2000000 }),
+  })
+  await devices.start(props.deviceId, 'iq')
   running.value = true
 
   if (isDemo.value) {
@@ -74,6 +85,15 @@ async function start(): Promise<void> {
     feedTimer = setInterval(() => {
       if (demo && follower) follower.feedTsbk(demo.next())
     }, 260)
+  } else {
+    decoder = new ControlChannelDecoder((octets) => follower?.feedTsbk(octets))
+    unsubscribe = bus.onDeviceArtifact(props.deviceId, (a) => {
+      if (a.kind !== 'iq') return
+      decoder?.feed(a.samples, a.sampleRate)
+    })
+    feedTimer = setInterval(() => {
+      lock.value = decoder?.getStats() ?? null
+    }, 500)
   }
   ageTimer = setInterval(() => follower?.tick(), 1000)
 }
@@ -84,6 +104,10 @@ async function stop(): Promise<void> {
   if (ageTimer) clearInterval(ageTimer)
   feedTimer = ageTimer = null
   demo = null
+  unsubscribe?.()
+  unsubscribe = null
+  decoder = null
+  lock.value = null
   await devices.stop(props.deviceId).catch(() => undefined)
 }
 
@@ -163,15 +187,40 @@ onBeforeUnmount(() => {
       </div>
     </div>
 
-    <InstScope :bins="stream.fft.value" :height="110" ruled :demo="!running" />
+    <InstScope :bins="stream.fft.value" :height="110" ruled :demo="!running && isDemo" />
+
+    <div v-if="!isDemo && running" class="bn-reads" style="margin-top: 12px">
+      <div class="bn-read">
+        <div class="bn-k">sync</div>
+        <div class="bn-v" :class="{ 'is-pink': (lock?.syncs ?? 0) > 0 }">
+          {{ lock?.syncs ?? 0 }}
+        </div>
+      </div>
+      <div class="bn-read">
+        <div class="bn-k">blocks</div>
+        <div class="bn-v" :class="{ 'is-pink': (lock?.good ?? 0) > 0 }">
+          {{ lock?.good ?? 0 }} good, {{ lock?.bad ?? 0 }} bad
+        </div>
+      </div>
+      <div class="bn-read">
+        <div class="bn-k">nac</div>
+        <div class="bn-v">
+          {{ lock?.nac === null || lock?.nac === undefined ? 'none yet' : '0x' + lock.nac.toString(16) }}
+        </div>
+      </div>
+      <div class="bn-read">
+        <div class="bn-k">eye</div>
+        <div class="bn-v">{{ ((1 - (lock?.errorRate ?? 1)) * 100).toFixed(0) }}%</div>
+      </div>
+    </div>
 
     <div v-if="!isDemo && running" class="bn-banner is-warn" style="margin-top: 12px">
       <HbIcon name="warning" />
       <span>
-        following a live trunk needs a c4fm control channel decoder this browser build
-        does not have yet. the receiver is parked on the control channel and the spectrum
-        is live. for full trunk following with voice, op25 and sdrtrunk are the tools.
-        turn on demo mode to see the activity view work.
+        the control channel is decoded here, so grants and talkgroups are real. the voice
+        channels are not: p25 carries imbe, which needs a vocoder this build does not
+        have. following a call retunes the radio to it and you will see the carrier, not
+        hear it. op25 and sdrtrunk decode the voice.
       </span>
     </div>
 

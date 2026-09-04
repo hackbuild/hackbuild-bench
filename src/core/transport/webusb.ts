@@ -134,6 +134,9 @@ export class UsbPort {
       while (!signal.aborted && this.isOpen) {
         try {
           const chunk = await this.bulkIn(endpoint, packetSize)
+          // a transfer already in flight when the signal aborts still lands
+          // here. delivering it emits samples after the caller has stopped.
+          if (signal.aborted) return
           if (chunk.byteLength) onChunk(chunk)
         } catch (err) {
           if (signal.aborted || !this.isOpen) return

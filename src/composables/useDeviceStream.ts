@@ -32,6 +32,8 @@ export function useDeviceStream(deviceId: string) {
 
   const packetCount = ref(0)
   const lastAudio = shallowRef<AudioChunk | null>(null)
+  /** Frames the device has actually delivered. Proof samples are moving. */
+  const frameCount = ref(0)
 
   const MAX_PACKETS = 400
   const MAX_LINES = 800
@@ -40,6 +42,7 @@ export function useDeviceStream(deviceId: string) {
     switch (a.kind) {
       case 'fft': {
         const f = a as FftFrame
+        frameCount.value++
         fft.value = f.bins
         centerHz.value = f.centerHz
         sampleRate.value = f.sampleRate
@@ -77,6 +80,10 @@ export function useDeviceStream(deviceId: string) {
 
   onBeforeUnmount(stop)
 
+  function clearFrames(): void {
+    frameCount.value = 0
+  }
+
   function clearPackets(): void {
     packets.value = []
     packetCount.value = 0
@@ -95,11 +102,13 @@ export function useDeviceStream(deviceId: string) {
     droppedSamples,
     packets,
     packetCount,
+    frameCount,
     lines,
     readings,
     lastAudio,
     clearPackets,
     clearLines,
+    clearFrames,
   }
 }
 

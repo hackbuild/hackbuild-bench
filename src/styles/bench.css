@@ -488,6 +488,17 @@ canvas {
   line-height: 1.5;
   margin: 12px 0 0;
 }
+/** An inline action inside a note, so it reads as part of the sentence. */
+.bn-linkish {
+  font-family: var(--hb-body);
+  font-size: 11px;
+  color: var(--hb-pink);
+  background: none;
+  border: 0;
+  border-bottom: 1px solid var(--hb-pink);
+  padding: 0;
+  cursor: pointer;
+}
 .bn-subhead select {
   font-family: var(--hb-utility);
   font-size: 10px;

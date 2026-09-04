@@ -347,7 +347,11 @@ class RtlSession implements RtlSdrSession {
   }
 
   async start(mode: string): Promise<void> {
-    if (mode !== 'iq') throw new Error(`rtl-sdr has no ${mode} mode, ask for iq`)
+    // a tool asks by capability, so iq, rx and spectrum name the same stream.
+    // this radio emits samples, and the bins come off them the same way.
+    if (mode !== 'iq' && mode !== 'rx' && mode !== 'spectrum') {
+      throw new Error(`rtl-sdr has no ${mode} mode. it takes iq, spectrum, or rx.`)
+    }
     if (this.pumping) return
 
     const abort = new AbortController()

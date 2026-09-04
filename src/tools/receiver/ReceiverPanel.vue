@@ -10,6 +10,7 @@ import { useDevices } from '@/stores/devices'
 import { useBench } from '@/stores/bench'
 import { useDeviceStream } from '@/composables/useDeviceStream'
 import { useReceiver } from '@/composables/useReceiver'
+import { isSimKind } from '@/core/drivers/sim/simulate'
 import { formatHz, formatRate } from '@/core/format'
 import type { DeviceToolProps } from '@/tools/types'
 import type { DemodMode } from '@/core/dsp/demod'
@@ -23,6 +24,37 @@ const rx = useReceiver(props.deviceId)
 
 const node = computed(() => devices.nodes.find((n) => n.id === props.deviceId) ?? null)
 const streaming = computed(() => node.value?.status === 'streaming')
+const sim = computed(() => isSimKind(node.value?.kind ?? ''))
+
+/** The window on screen, which is what the marker positions are measured in. */
+const span = computed(
+  () => rx.windowHz.value || stream.sampleRate.value || node.value?.params.sampleRate || 0,
+)
+
+/** Where the marker sits across the display, 0 at the left edge and 1 at the right. */
+const marker = computed(() => (span.value ? 0.5 + rx.offsetHz.value / span.value : 0.5))
+const markerWidth = computed(() => (span.value ? rx.bandwidthHz.value / span.value : 0))
+
+/** The frequency actually being demodulated, offset included. */
+const listeningHz = computed(() => centerHz.value + rx.offsetHz.value)
+
+function tuneTo(fraction: number): void {
+  if (!span.value) return
+  rx.setOffset((fraction - 0.5) * span.value)
+}
+
+function widthTo(fraction: number): void {
+  if (!span.value) return
+  rx.setBandwidth(fraction * span.value)
+}
+
+/** Put the listening point back on the middle of the window. */
+function recentre(): void {
+  rx.setOffset(0)
+}
+
+// the placeholder trace is invented, so real hardware never draws it.
+const placeholder = computed(() => !streaming.value && sim.value)
 
 const BANDS = [
   { label: 'fm', hz: 100.3e6, mode: 'fm' as DemodMode },
@@ -138,6 +170,14 @@ onBeforeUnmount(() => {
         <div class="bn-k">sig</div>
         <div class="bn-v">{{ rx.signalDb.value.toFixed(0) }} dB</div>
       </div>
+      <div v-if="span">
+        <div class="bn-k">listening</div>
+        <div class="bn-v is-pink">{{ formatHz(listeningHz) }}</div>
+      </div>
+      <div v-if="span">
+        <div class="bn-k">width</div>
+        <div class="bn-v">{{ formatHz(rx.bandwidthHz.value, 1) }}</div>
+      </div>
       <div v-if="node?.info.tuner">
         <div class="bn-k">tuner</div>
         <div class="bn-v">{{ node.info.tuner }}</div>
@@ -230,11 +270,38 @@ onBeforeUnmount(() => {
 
     <InstSmeter :db="rx.signalDb.value" />
 
-    <InstScope :bins="stream.fft.value" :height="170" ruled :demo="!streaming" />
+    <p v-if="!streaming && !sim" class="bn-note" style="margin-top: 0">
+      idle. nothing is being sampled until you press listen.
+    </p>
+
+    <p v-if="span" class="bn-note" style="margin-bottom: 4px">
+      click the trace or the waterfall to move where you are listening, drag the edges of
+      the lit band to widen or narrow it. the radio stays where it is tuned, this moves
+      inside the window it is already receiving.
+      <button v-if="rx.offsetHz.value" type="button" class="bn-linkish" @click="recentre">
+        back to centre
+      </button>
+    </p>
+
+    <InstScope
+      :bins="stream.fft.value"
+      :height="170"
+      ruled
+      :demo="placeholder"
+      :marker="span ? marker : null"
+      :marker-width="markerWidth"
+      :interactive="!!span"
+      @tune="tuneTo"
+      @width="widthTo"
+    />
     <InstWaterfall
       :bins="stream.fft.value"
       :height="120"
-      :demo="!streaming"
+      :demo="placeholder"
+      :marker="span ? marker : null"
+      :marker-width="markerWidth"
+      :interactive="!!span"
+      @tune="tuneTo"
       style="margin-top: 8px"
     />
 

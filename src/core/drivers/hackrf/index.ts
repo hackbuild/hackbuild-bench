@@ -75,6 +75,13 @@ const TX_QUEUE_BYTES = TRANSFER_BYTES * 8
 /** A frame longer than this is refused rather than held in memory. */
 const TX_FRAME_LIMIT_SECONDS = 10
 const FFT_SIZE = 2048
+/**
+ * Transfers dropped after a retune. They still carry the old frequency, and
+ * waiting on them is also what gives the pll time to settle: a timer cannot be
+ * used for that, a background tab throttles setTimeout to one second and the
+ * sweep collapses to a step per second. A transfer is paced by the radio.
+ */
+const SWEEP_DISCARD = 3
 /** Publish spectrum at 20 fps whatever the sample rate feeds in. */
 const FFT_INTERVAL_MS = 50
 const AUDIO_RATE = 48000
@@ -145,6 +152,43 @@ function clamp(v: number, lo: number, hi: number): number {
 }
 
 /**
+ * Tools ask the bus for a capability, never for a device kind, so the same
+ * request has to work on every radio that provides it. A panel wanting raw
+ * samples asks for iq and one wanting bins asks for spectrum. Both are the
+ * receive stream here, which emits samples and bins together.
+ */
+function askedFor(mode: string): string {
+  if (mode === 'iq' || mode === 'spectrum') return 'rx'
+  return mode
+}
+
+/**
+ * Subtracts the mean from interleaved IQ in place.
+ *
+ * A zero if front end leaves a dc offset that lands in the middle of the
+ * window, which draws as a carrier that is not on the air. In a sweep it is
+ * worse: one at the centre of every step, a comb of signals that do not exist.
+ * Only the copy the fft sees is corrected, the samples handed out are the ones
+ * the radio sent.
+ */
+function removeDc(iq: Float32Array): void {
+  const pairs = iq.length >> 1
+  if (pairs === 0) return
+  let si = 0
+  let sq = 0
+  for (let i = 0; i < pairs; i++) {
+    si += iq[i * 2]
+    sq += iq[i * 2 + 1]
+  }
+  const mi = si / pairs
+  const mq = sq / pairs
+  for (let i = 0; i < pairs; i++) {
+    iq[i * 2] -= mi
+    iq[i * 2 + 1] -= mq
+  }
+}
+
+/**
  * The hackrf session as a panel sees it. Beyond the adapter contract it takes
  * baseband to put on the air, which is what the transmit studio drives.
  */
@@ -156,17 +200,16 @@ export interface HackRfSession extends TransmitSession {
 class HackRfOneSession implements HackRfSession {
   private usb: UsbPort
   private ctx: DriverContext
-  private params: Record<string, number> = {
-    centerHz: 433.92e6,
-    sampleRate: 10000000,
-    lna: 24,
-    vga: 20,
-    txvga: 0,
-    amp: 0,
-  }
+  // straight off the descriptor, so the knobs the panel shows and the values
+  // the radio runs on cannot drift apart. sweepLowHz and sweepHighHz matter
+  // here: missing, the sweep silently ran 1 MHz to 6 GHz.
+  private params: Record<string, number> = Object.fromEntries(
+    hackrfDescriptor.params.map((p) => [p.key, p.default]),
+  )
   private applied: Record<string, number> = {}
   private info: Record<string, string> = {}
   private analyzer = new SpectrumAnalyzer(FFT_SIZE)
+  private fftScratch = new Float32Array(FFT_SIZE * 2)
   private chain = new ReceiveChain(AUDIO_RATE)
   private abort: AbortController | null = null
   private lastFftAt = 0
@@ -330,16 +373,27 @@ class HackRfOneSession implements HackRfSession {
     }
   }
 
+  /**
+   * The streaming loops run detached from start, so without this a failure in
+   * one is an unhandled rejection: the panel just sits there showing nothing.
+   */
+  private detach(what: string, run: Promise<void>): void {
+    void run.catch((err: unknown) => {
+      const why = err instanceof Error ? err.message : String(err)
+      this.ctx.log(`${what} stopped: ${why}`)
+    })
+  }
+
   async start(mode: string): Promise<void> {
     await this.stop()
-    const [head, tail] = mode.split(':')
+    const [head, tail] = askedFor(mode).split(':')
 
     if (head === 'tx') {
       await this.beginTransmit()
       this.ctx.log(
         `carrier out at ${(this.params.centerHz / 1e6).toFixed(3)} MHz, tx gain ${Math.round(this.params.txvga)} dB`,
       )
-      void this.carrierLoop()
+      this.detach('carrier', this.carrierLoop())
       return
     }
 
@@ -349,13 +403,13 @@ class HackRfOneSession implements HackRfSession {
 
     if (head === 'rx') {
       await this.setTransceiverMode(MODE.RECEIVE)
-      void this.receive(abort.signal, null)
+      this.detach('receive', this.receive(abort.signal, null))
       return
     }
 
     if (head === 'sweep') {
       await this.setTransceiverMode(MODE.RECEIVE)
-      void this.sweep(abort.signal)
+      this.detach('sweep', this.sweep(abort.signal))
       return
     }
 
@@ -367,12 +421,14 @@ class HackRfOneSession implements HackRfSession {
       }
       this.chain.configure(demod, this.params.sampleRate)
       await this.setTransceiverMode(MODE.RECEIVE)
-      void this.receive(abort.signal, demod)
+      this.detach('audio', this.receive(abort.signal, demod))
       return
     }
 
     this.abort = null
-    throw new Error(`hackrf has no mode called ${mode}`)
+    throw new Error(
+      `hackrf has no mode called ${mode}. it takes iq, spectrum, sweep, tx, or audio with one of fm, nfm, am, usb, lsb.`,
+    )
   }
 
   async stop(): Promise<void> {
@@ -438,47 +494,67 @@ class HackRfOneSession implements HackRfSession {
    * window using only the verified setFreq and fft paths, at the cost of being
    * slower than the device's native hardware sweep.
    *
-   * The range comes from sweepLowHz and sweepHighHz, defaulting to the whole
-   * tuner range. Each step keeps the middle of the window and drops the edges
-   * where the filter rolls off and the DC spike sits.
+   * Each step keeps the middle 75 percent of its window and drops the edges
+   * where the baseband filter rolls off. The panorama therefore covers whole
+   * steps, not the requested range exactly, so the frame reports the span it
+   * actually holds and the display cannot stretch it onto the wrong
+   * frequencies.
    */
   private async sweep(signal: AbortSignal): Promise<void> {
     const lowHz = Math.max(1e6, this.params.sweepLowHz || 1e6)
-    const highHz = Math.min(6000e6, this.params.sweepHighHz || 6000e6)
+    const highHz = Math.max(lowHz + 1e6, Math.min(6000e6, this.params.sweepHighHz || 6000e6))
     const rate = this.params.sampleRate
-    // keep the middle 75 percent of each window, so steps overlap slightly.
     const usable = rate * 0.75
     const segBins = Math.floor(FFT_SIZE * 0.75)
     const edge = Math.floor((FFT_SIZE - segBins) / 2)
+    // whole steps from lowHz up, so the last one may reach past highHz.
+    const steps = Math.max(1, Math.ceil((highHz - lowHz) / usable))
+    const spanHz = steps * usable
+    const scratch = new Float32Array(FFT_SIZE * 2)
 
     while (!signal.aborted && this.usb.isOpen) {
-      const panorama: number[] = []
-      let center = lowHz + usable / 2
-      while (center <= highHz && !signal.aborted) {
-        await this.setFreq(center)
-        // let the pll settle before the sample is meaningful.
-        await new Promise((r) => setTimeout(r, 6))
+      const panorama = new Float32Array(steps * segBins)
+      let filled = 0
+      for (let step = 0; step < steps && !signal.aborted; step++) {
+        const center = lowHz + usable * (step + 0.5)
         let chunk: Uint8Array
         try {
+          await this.setFreq(center)
+          // the radio is left where the sweep put it, so a later tune knows to
+          // move it back rather than assuming centerHz is still applied.
+          this.applied.centerHz = center
+          // the endpoint still holds samples from the previous step, so the
+          // first transfers after a retune are thrown away. reading them is
+          // also the settle time, paced by the radio rather than by a timer.
+          for (let i = 0; i < SWEEP_DISCARD; i++) await this.usb.bulkIn(EP_RX, TRANSFER_BYTES)
           chunk = await this.usb.bulkIn(EP_RX, TRANSFER_BYTES)
-        } catch {
+        } catch (err) {
           if (signal.aborted) return
+          // a swallowed read failure here leaves the panel blank with nothing
+          // to explain it, so say which step gave up.
+          const why = err instanceof Error ? err.message : String(err)
+          this.ctx.log(`sweep gave up at ${(center / 1e6).toFixed(3)} MHz: ${why}`)
           break
         }
         const s = new Int8Array(chunk.buffer, chunk.byteOffset, chunk.byteLength)
-        const iq = new Float32Array(Math.min(s.length, FFT_SIZE * 2))
-        for (let i = 0; i < iq.length; i++) iq[i] = s[i] / 127
-        const bins = this.analyzer.process(iq)
-        for (let i = edge; i < edge + segBins; i++) panorama.push(bins[i])
-        center += usable
+        const n = Math.min(s.length, scratch.length)
+        for (let i = 0; i < n; i++) scratch[i] = s[i] / 127
+        for (let i = n; i < scratch.length; i++) scratch[i] = 0
+        removeDc(scratch)
+        const bins = this.analyzer.process(scratch)
+        panorama.set(bins.subarray(edge, edge + segBins), filled)
+        filled += segBins
       }
       if (signal.aborted) return
-      this.params.centerHz = (lowHz + highHz) / 2
+      if (filled === 0) {
+        this.ctx.log('sweep produced nothing, stopping')
+        return
+      }
       const frame: Emitted<FftFrame> = {
         kind: 'fft',
-        bins: Float32Array.from(panorama),
-        centerHz: (lowHz + highHz) / 2,
-        sampleRate: highHz - lowHz,
+        bins: filled === panorama.length ? panorama : panorama.subarray(0, filled),
+        centerHz: lowHz + spanHz / 2,
+        sampleRate: spanHz,
       }
       this.ctx.emit(frame)
     }
@@ -518,9 +594,11 @@ class HackRfOneSession implements HackRfSession {
     if (now - this.lastFftAt < FFT_INTERVAL_MS) return
     if (iq.length < FFT_SIZE * 2) return
     this.lastFftAt = now
+    this.fftScratch.set(iq.subarray(0, FFT_SIZE * 2))
+    removeDc(this.fftScratch)
     const frame: Emitted<FftFrame> = {
       kind: 'fft',
-      bins: this.analyzer.process(iq).slice(),
+      bins: this.analyzer.process(this.fftScratch).slice(),
       centerHz,
       sampleRate,
     }

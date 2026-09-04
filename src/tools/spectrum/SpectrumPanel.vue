@@ -7,6 +7,7 @@ import InstKnob from '@/components/instruments/InstKnob.vue'
 import { useDevices } from '@/stores/devices'
 import { useBench } from '@/stores/bench'
 import { useDeviceStream } from '@/composables/useDeviceStream'
+import { isSimKind } from '@/core/drivers/sim/simulate'
 import { formatHz, formatRate } from '@/core/format'
 import type { DeviceToolProps } from '@/tools/types'
 
@@ -19,6 +20,11 @@ const stream = useDeviceStream(props.deviceId)
 const node = computed(() => devices.nodes.find((n) => n.id === props.deviceId) ?? null)
 const streaming = computed(() => node.value?.status === 'streaming')
 const params = computed(() => node.value?.descriptor.params ?? [])
+const sim = computed(() => isSimKind(node.value?.kind ?? ''))
+
+// the animated trace is made up. only a simulated radio may draw it, otherwise
+// an idle hackrf looks like it is receiving three carriers that are not there.
+const placeholder = computed(() => !streaming.value && sim.value)
 
 const visible = computed(() =>
   params.value.filter((p) => bench.advanced || ['centerHz', 'gain', 'channel'].includes(p.key)),
@@ -43,19 +49,24 @@ const canWideSweep = computed(() =>
   (node.value?.descriptor.params ?? []).some((p) => p.key === 'sweepLowHz'),
 )
 
+/** Set once this panel starts the radio, so it only stops its own run. */
+let startedHere = false
+
 async function sweep(): Promise<void> {
   // the hackrf steps a real wideband panorama; other radios show the
   // instantaneous window they are tuned to.
   const mode = node.value?.kind === 'ubertooth' ? 'spectrum' : canWideSweep.value ? 'sweep' : 'rx'
   await devices.start(props.deviceId, mode)
+  startedHere = true
 }
 
 async function halt(): Promise<void> {
+  startedHere = false
   await devices.stop(props.deviceId)
 }
 
 onBeforeUnmount(() => {
-  if (streaming.value) void devices.stop(props.deviceId).catch(() => undefined)
+  if (startedHere) void devices.stop(props.deviceId).catch(() => undefined)
 })
 </script>
 
@@ -86,11 +97,18 @@ onBeforeUnmount(() => {
       switch to advanced to set the range, the default is 400 to 500 MHz.
     </p>
 
-    <InstScope :bins="stream.fft.value" :height="180" ruled :demo="!streaming" />
+    <p v-if="!streaming && !sim" class="bn-note" style="margin-top: 0">
+      idle. the radio is connected but not sampling anything. press sweep.
+    </p>
+    <p v-else-if="streaming && !stream.frameCount.value" class="bn-note" style="margin-top: 0">
+      sweeping, no frame yet. a wide range takes a few seconds per pass.
+    </p>
+
+    <InstScope :bins="stream.fft.value" :height="180" ruled :demo="placeholder" />
     <InstWaterfall
       :bins="stream.fft.value"
       :height="110"
-      :demo="!streaming"
+      :demo="placeholder"
       style="margin-top: 8px"
     />
 
@@ -110,6 +128,10 @@ onBeforeUnmount(() => {
       <div class="bn-read">
         <div class="bn-k">high</div>
         <div class="bn-v">{{ formatHz(highEdge, 2) }}</div>
+      </div>
+      <div class="bn-read">
+        <div class="bn-k">frames</div>
+        <div class="bn-v">{{ stream.frameCount.value }}</div>
       </div>
     </div>
 

@@ -15,6 +15,12 @@ interface Props {
   auto?: boolean
   /** Run the placeholder trace while bins is null. */
   demo?: boolean
+  /** Listening point as a fraction of the width. null draws no marker. */
+  marker?: number | null
+  /** Passband width as a fraction of the width, centred on the marker. */
+  markerWidth?: number
+  /** Let a pointer move the marker and drag its edges. */
+  interactive?: boolean
 }
 
 const props = withDefaults(defineProps<Props>(), {
@@ -24,7 +30,12 @@ const props = withDefaults(defineProps<Props>(), {
   maxDb: -10,
   auto: true,
   demo: false,
+  marker: null,
+  markerWidth: 0,
+  interactive: false,
 })
+
+const emit = defineEmits<{ tune: [fraction: number]; width: [fraction: number] }>()
 
 const range = new AutoRange()
 
@@ -86,6 +97,27 @@ function tracePlaceholder(ctx: CanvasRenderingContext2D, w: number, h: number): 
   ctx.stroke()
 }
 
+/**
+ * The listening point and the slice being demodulated around it. Drawn over
+ * the trace so it reads as an overlay on the signal, not part of it.
+ */
+function drawMarker(ctx: CanvasRenderingContext2D, w: number, h: number): void {
+  const m = props.marker
+  if (m === null || m === undefined || !tokens) return
+  const x = m * w
+  const band = Math.max(2, (props.markerWidth ?? 0) * w)
+  ctx.save()
+  ctx.fillStyle = tokens.pink
+  ctx.globalAlpha = 0.15
+  ctx.fillRect(x - band / 2, 0, band, h)
+  ctx.globalAlpha = 0.5
+  ctx.fillRect(Math.round(x - band / 2) + 0.5, 0, 1, h)
+  ctx.fillRect(Math.round(x + band / 2) - 0.5, 0, 1, h)
+  ctx.globalAlpha = 1
+  ctx.fillRect(Math.round(x) - 0.5, 0, 1, h)
+  ctx.restore()
+}
+
 function draw(): void {
   const el = canvas.value
   if (!el || !tokens) return
@@ -98,6 +130,50 @@ function draw(): void {
   ctx.lineWidth = 1.5
   if (props.bins && props.bins.length > 1) traceBins(ctx, w, h, props.bins)
   else if (props.demo) tracePlaceholder(ctx, w, h)
+  drawMarker(ctx, w, h)
+}
+
+type Grab = 'centre' | 'low' | 'high'
+let dragging: Grab | null = null
+
+function fractionAt(ev: PointerEvent): number {
+  const el = canvas.value
+  if (!el) return 0.5
+  const r = el.getBoundingClientRect()
+  if (r.width <= 0) return 0.5
+  return Math.max(0, Math.min(1, (ev.clientX - r.left) / r.width))
+}
+
+function onDown(ev: PointerEvent): void {
+  const el = canvas.value
+  if (!props.interactive || !el) return
+  const r = el.getBoundingClientRect()
+  const f = fractionAt(ev)
+  const centre = props.marker ?? 0.5
+  const half = (props.markerWidth ?? 0) / 2
+  // within a few pixels of an edge grabs the edge, anywhere else retunes.
+  const grab = r.width > 0 ? 7 / r.width : 0.01
+  if (half > 0 && Math.abs(f - (centre - half)) < grab) dragging = 'low'
+  else if (half > 0 && Math.abs(f - (centre + half)) < grab) dragging = 'high'
+  else {
+    dragging = 'centre'
+    emit('tune', f)
+  }
+  el.setPointerCapture(ev.pointerId)
+  ev.preventDefault()
+}
+
+function onMove(ev: PointerEvent): void {
+  if (!dragging) return
+  const f = fractionAt(ev)
+  if (dragging === 'centre') emit('tune', f)
+  else emit('width', Math.abs(f - (props.marker ?? 0.5)) * 2)
+}
+
+function onUp(ev: PointerEvent): void {
+  if (!dragging) return
+  dragging = null
+  canvas.value?.releasePointerCapture(ev.pointerId)
 }
 
 function animating(): boolean {
@@ -134,13 +210,31 @@ onBeforeUnmount(() => {
 
 // A frame arrives as a new array. Mutating one in place will not repaint.
 watch(
-  () => [props.bins, props.demo, props.height, props.minDb, props.maxDb],
+  () => [
+    props.bins,
+    props.demo,
+    props.height,
+    props.minDb,
+    props.maxDb,
+    props.marker,
+    props.markerWidth,
+  ],
   () => restart(),
 )
 </script>
 
 <template>
   <div class="bn-void" :class="{ 'is-ruled': ruled }" :style="{ height: height + 'px' }">
-    <canvas ref="canvas" style="height: 100%" role="img" aria-label="spectrum trace"></canvas>
+    <canvas
+      ref="canvas"
+      style="height: 100%"
+      :style="{ touchAction: interactive ? 'none' : undefined, cursor: interactive ? 'ew-resize' : undefined }"
+      role="img"
+      aria-label="spectrum trace"
+      @pointerdown="onDown"
+      @pointermove="onMove"
+      @pointerup="onUp"
+      @pointercancel="onUp"
+    ></canvas>
   </div>
 </template>

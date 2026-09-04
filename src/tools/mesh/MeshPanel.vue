@@ -41,11 +41,16 @@ const messages = computed(() =>
   stream.packets.value.filter((p) => p.fields?.type === 'text').slice(0, 60),
 )
 
+/** Set once this panel starts the device, so it only stops its own run. */
+let startedHere = false
+
 async function listen(): Promise<void> {
   await devices.start(props.deviceId, 'listen')
+  startedHere = true
 }
 
 async function halt(): Promise<void> {
+  startedHere = false
   await devices.stop(props.deviceId)
 }
 
@@ -64,7 +69,7 @@ async function send(): Promise<void> {
 }
 
 onBeforeUnmount(() => {
-  if (streaming.value) void devices.stop(props.deviceId).catch(() => undefined)
+  if (startedHere) void devices.stop(props.deviceId).catch(() => undefined)
 })
 </script>
 

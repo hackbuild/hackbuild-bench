@@ -9,6 +9,7 @@ import { useBench } from '@/stores/bench'
 import { toolsForDevice, unmetToolsForDevice } from '@/tools/registry'
 import type { DeviceNode } from '@/core/types'
 import { impactOf } from '@/core/capabilities'
+import { isSimKind } from '@/core/drivers/sim/simulate'
 import type { Capability } from '@/core/capabilities'
 
 interface Props {
@@ -19,6 +20,8 @@ const props = defineProps<Props>()
 
 const devices = useDevices()
 const bench = useBench()
+
+const simulated = computed(() => isSimKind(props.node.kind))
 
 const tools = computed(() => toolsForDevice(props.node, bench.advanced))
 const unmet = computed(() => unmetToolsForDevice(props.node, bench.advanced))
@@ -59,7 +62,9 @@ async function disconnect(): Promise<void> {
         v-if="node.status === 'error'"
         class="bn-badge is-warn"
       >{{ node.status }}</span>
-      <span v-else class="bn-badge">{{ node.transport }}</span>
+      <span v-else-if="simulated" class="bn-badge">simulated</span>
+      <span v-else class="bn-badge">{{ node.transport }} hardware</span>
+      <span v-if="node.status === 'streaming'" class="bn-badge">live</span>
       <span class="bn-planedesc">{{ node.descriptor.blurb }}</span>
 
       <div class="bn-grow"></div>

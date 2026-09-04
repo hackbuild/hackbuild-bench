@@ -14,6 +14,12 @@ interface Props {
   auto?: boolean
   /** Scroll a placeholder while bins is null. */
   demo?: boolean
+  /** Listening point as a fraction of the width. null draws no marker. */
+  marker?: number | null
+  /** Passband width as a fraction of the width, centred on the marker. */
+  markerWidth?: number
+  /** Let a pointer set the listening point. */
+  interactive?: boolean
 }
 
 const props = withDefaults(defineProps<Props>(), {
@@ -22,7 +28,43 @@ const props = withDefaults(defineProps<Props>(), {
   maxDb: -10,
   auto: true,
   demo: false,
+  marker: null,
+  markerWidth: 0,
+  interactive: false,
 })
+
+const emit = defineEmits<{ tune: [fraction: number] }>()
+
+// the waterfall scrolls its own canvas, so a marker drawn onto it would slide
+// down with the history. it sits over the top instead.
+const shell = ref<HTMLElement | null>(null)
+let tuning = false
+
+function fractionAt(ev: PointerEvent): number {
+  const el = shell.value
+  if (!el) return 0.5
+  const r = el.getBoundingClientRect()
+  if (r.width <= 0) return 0.5
+  return Math.max(0, Math.min(1, (ev.clientX - r.left) / r.width))
+}
+
+function onDown(ev: PointerEvent): void {
+  if (!props.interactive || !shell.value) return
+  tuning = true
+  shell.value.setPointerCapture(ev.pointerId)
+  emit('tune', fractionAt(ev))
+  ev.preventDefault()
+}
+
+function onMove(ev: PointerEvent): void {
+  if (tuning) emit('tune', fractionAt(ev))
+}
+
+function onUp(ev: PointerEvent): void {
+  if (!tuning) return
+  tuning = false
+  shell.value?.releasePointerCapture(ev.pointerId)
+}
 
 const range = new AutoRange()
 
@@ -130,7 +172,47 @@ watch(
 </script>
 
 <template>
-  <div class="bn-void" :style="{ height: height + 'px' }">
+  <div
+    ref="shell"
+    class="bn-void"
+    :style="{
+      height: height + 'px',
+      position: 'relative',
+      touchAction: interactive ? 'none' : undefined,
+      cursor: interactive ? 'ew-resize' : undefined,
+    }"
+    @pointerdown="onDown"
+    @pointermove="onMove"
+    @pointerup="onUp"
+    @pointercancel="onUp"
+  >
     <canvas ref="canvas" style="height: 100%" role="img" aria-label="waterfall history"></canvas>
+    <template v-if="marker !== null && marker !== undefined">
+      <i
+        aria-hidden="true"
+        :style="{
+          position: 'absolute',
+          top: 0,
+          bottom: 0,
+          left: (marker - (markerWidth ?? 0) / 2) * 100 + '%',
+          width: (markerWidth ?? 0) * 100 + '%',
+          background: 'var(--hb-pink)',
+          opacity: 0.18,
+          pointerEvents: 'none',
+        }"
+      />
+      <i
+        aria-hidden="true"
+        :style="{
+          position: 'absolute',
+          top: 0,
+          bottom: 0,
+          left: marker * 100 + '%',
+          width: '1px',
+          background: 'var(--hb-pink)',
+          pointerEvents: 'none',
+        }"
+      />
+    </template>
   </div>
 </template>

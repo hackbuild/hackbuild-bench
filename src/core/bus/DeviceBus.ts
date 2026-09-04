@@ -138,6 +138,14 @@ export class DeviceBus {
     try {
       const session = await driver.open(handle, ctx)
       entry.session = session
+      // the panel reads node.params, which came from the descriptor defaults.
+      // push them once so the session is not running on its own idea of them.
+      try {
+        await session.configure({ ...node.params })
+      } catch (err) {
+        const why = err instanceof Error ? err.message : String(err)
+        this.fire({ type: 'log', deviceId: id, message: `defaults not applied: ${why}`, at: Date.now() })
+      }
       node.capabilities = session.getCapabilities()
       Object.assign(node.info, session.getInfo())
       node.status = 'idle'

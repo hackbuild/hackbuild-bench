@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount } from 'vue'
+import { computed, onBeforeUnmount, watch } from 'vue'
 import { HbToaster } from '@virgilvox/hackbuild-ui'
 import BenchHeader from '@/components/bench/BenchHeader.vue'
 import BenchStatus from '@/components/bench/BenchStatus.vue'
@@ -27,6 +27,25 @@ const crumb = computed(() => {
   if (selectedTool.value) return selectedTool.value.label
   return devices.focused?.label ?? 'nothing selected'
 })
+
+/**
+ * The rail selects a device or a bench tool through the same id, so nothing
+ * being focused is a real state. With devices on the bench it is the wrong
+ * one to show: the empty bench claims there is no hardware while the rail
+ * lists it. Fall back to the first device.
+ */
+watch(
+  () => [devices.nodes, devices.focusId],
+  () => {
+    if (selectedTool.value || devices.focused) return
+    // not while it is still opening: its capabilities are not known yet, so
+    // the only tool that fits is the info panel and the rail would land there
+    // instead of on what the device is for.
+    const first = devices.nodes.find((n) => n.status !== 'opening')
+    if (first) devices.focus(first.id)
+  },
+  { immediate: true },
+)
 
 onBeforeUnmount(() => {
   void bus.detachAll()

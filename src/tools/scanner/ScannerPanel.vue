@@ -10,6 +10,7 @@ import { CHANNEL_GROUPS, SERVICE_LABELS } from '@/core/scanner/conventional'
 import type { ConventionalChannel } from '@/core/scanner/conventional'
 import { useDevices } from '@/stores/devices'
 import { useDeviceStream } from '@/composables/useDeviceStream'
+import { isSimKind } from '@/core/drivers/sim/simulate'
 import { useReceiver } from '@/composables/useReceiver'
 import { useTranscription } from '@/composables/useTranscription'
 import { formatClock, formatHz } from '@/core/format'
@@ -27,6 +28,11 @@ const mode = ref<'conventional' | 'trunked'>('conventional')
 const selectedGroups = ref<string[]>(['weather', 'interop'])
 const threshold = ref(-70)
 const running = ref(false)
+// only a simulated radio draws the invented trace, a real one shows nothing
+// until it is actually sampling.
+const sim = computed(() =>
+  isSimKind(devices.nodes.find((n) => n.id === props.deviceId)?.kind ?? ''),
+)
 const state = ref<ScanState>('idle')
 const entries = shallowRef<ScanEntry[]>([])
 const calls = shallowRef<ScanCall[]>([])
@@ -230,7 +236,7 @@ onBeforeUnmount(() => {
     </div>
 
     <InstSmeter :db="rx.signalDb.value" />
-    <InstScope :bins="stream.fft.value" :height="120" ruled :demo="!running" />
+    <InstScope :bins="stream.fft.value" :height="120" ruled :demo="!running && sim" />
 
     <div class="bn-subhead" style="margin-top: 14px">
       calls

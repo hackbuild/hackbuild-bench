@@ -37,11 +37,16 @@ const lines = computed(() =>
   stream.lines.value.map((l) => ({ text: l.text, stream: l.stream, at: l.wall })),
 )
 
+/** Set once this panel starts the device, so it only stops its own run. */
+let startedHere = false
+
 async function open(): Promise<void> {
   await devices.start(props.deviceId, 'console')
+  startedHere = true
 }
 
 async function close(): Promise<void> {
+  startedHere = false
   await devices.stop(props.deviceId)
 }
 
@@ -75,7 +80,7 @@ function sessionFor(): SerialSession | undefined {
 }
 
 onBeforeUnmount(() => {
-  if (streaming.value) void devices.stop(props.deviceId).catch(() => undefined)
+  if (startedHere) void devices.stop(props.deviceId).catch(() => undefined)
 })
 </script>
 
