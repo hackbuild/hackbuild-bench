@@ -458,6 +458,7 @@ export class AprsDecoder {
     this.byteAcc = 0
     this.bitCount = 0
     this.frame = []
+    this.bad = 0
   }
 
   feed(audio: Float32Array, sampleRate: number): void {

@@ -1,5 +1,5 @@
 /**
- * R820T / R828D tuner.
+ * R820T tuner.
  *
  * The tuner sits behind the RTL2832U i2c gate, so the caller opens the gate
  * before touching any method here and closes it afterwards.
@@ -7,10 +7,10 @@
 
 import type { RtlCom } from './rtlcom'
 
-/** Tuner address on the gated i2c bus. */
+/** Tuner address on the gated i2c bus. The R828D answers at 0x74 instead. */
 export const R820T_ADDR = 0x34
 
-/** Register 0 reads back 0x69 on both the R820T and the R828D. */
+/** Register 0 reads back 0x69 at that address. */
 export const R820T_ID = 0x69
 
 /** Written to registers 5 through 31, index plus 5. */

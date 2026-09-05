@@ -29,7 +29,7 @@ decoder.onBadFrame = () => {
 }
 
 const audio = useDecodeAudio(props.deviceId, {
-  mode: 'fm',
+  mode: 'nfm',
   onAudio: (samples, rate) => decoder.feed(samples, rate),
   demo: () => new AprsDemoSource(),
   demoSpeed: 6,
@@ -207,6 +207,15 @@ function clear(): void {
         145.175 MHz in australia. set the receiver to narrow fm and leave the squelch open,
         since a closed squelch clips the front of a packet and the frame check then fails.
         stations beacon every few minutes, so give it time before deciding nothing is there.
+      </div>
+    </div>
+
+    <div v-if="audio.isSim.value" class="bn-hint">
+      <HbIcon name="flask" :size="15" />
+      <div>
+        <b>demo</b>
+        this device is simulated, so the panel synthesises the bell 202 tones and runs them
+        through the same decoder. it plays at six times real time.
       </div>
     </div>
   </div>

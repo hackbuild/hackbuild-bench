@@ -87,8 +87,17 @@ export const useDevices = defineStore('devices', () => {
     if (focusId.value === id) focusId.value = nodes.value[0]?.id ?? null
   }
 
+  /**
+   * The scan and sweep loops await this on every hop and must survive a hop the
+   * radio refuses, so a refusal reaches the panel through the bus error event
+   * and node.error alone.
+   */
   async function configure(id: string, params: Record<string, number>): Promise<void> {
-    await bus.configure(id, params)
+    try {
+      await bus.configure(id, params)
+    } catch {
+      // already reported through the bus error event.
+    }
     sync()
   }
 
@@ -109,11 +118,6 @@ export const useDevices = defineStore('devices', () => {
 
   function disarm(id: string, cap: Capability): void {
     bus.disarm(id, cap)
-    sync()
-  }
-
-  function rename(id: string, label: string): void {
-    bus.rename(id, label)
     sync()
   }
 
@@ -139,7 +143,6 @@ export const useDevices = defineStore('devices', () => {
     stop,
     arm,
     disarm,
-    rename,
     logsFor,
     sync,
   }

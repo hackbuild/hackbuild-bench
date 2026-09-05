@@ -55,7 +55,7 @@ const descriptor: DeviceDescriptor = {
   blurb: 'a mesh radio you can read and write',
   icon: 'tower-broadcast',
   transports: ['webserial', 'webble'],
-  capabilities: [CAPABILITIES.MESH_RX, CAPABILITIES.MESH_TX, CAPABILITIES.GNSS_FIX],
+  capabilities: [CAPABILITIES.MESH_RX, CAPABILITIES.MESH_TX],
   params: [],
   serialFilters: [
     { usbVendorId: 0x239a }, // Adafruit nRF52
@@ -160,6 +160,14 @@ interface MeshLink {
 }
 
 class SerialMeshLink implements MeshLink {
+  // the port has one reader, and a read still pending when a listen run ends
+  // resolves into the next run. the loop and the framer span the life of the
+  // link, and only the sink changes between runs.
+  private framer = new StreamFramer()
+  private sink: ((payload: Uint8Array) => void) | null = null
+  private reading = false
+  private loop = new AbortController()
+
   constructor(private port: SerialPortHandle) {}
 
   async sendToRadio(bytes: Uint8Array): Promise<void> {
@@ -170,13 +178,22 @@ class SerialMeshLink implements MeshLink {
     onFromRadio: (payload: Uint8Array) => void,
     signal: AbortSignal,
   ): Promise<void> {
-    const framer = new StreamFramer()
+    if (signal.aborted) return
+    this.sink = onFromRadio
+    signal.addEventListener('abort', () => {
+      if (this.sink === onFromRadio) this.sink = null
+    })
+    if (this.reading) return
+    this.reading = true
     void this.port
       .read((chunk) => {
-        for (const payload of framer.push(chunk)) onFromRadio(payload)
-      }, signal)
+        for (const payload of this.framer.push(chunk)) this.sink?.(payload)
+      }, this.loop.signal)
       .catch(() => {
-        // reader ends on abort or disconnect.
+        // reader ends on disconnect.
+      })
+      .finally(() => {
+        this.reading = false
       })
   }
 
@@ -185,6 +202,8 @@ class SerialMeshLink implements MeshLink {
   }
 
   async close(): Promise<void> {
+    this.sink = null
+    this.loop.abort()
     await this.port.disconnect()
   }
 }
@@ -205,6 +224,7 @@ class BleMeshLink implements MeshLink {
     signal: AbortSignal,
   ): Promise<void> {
     this.onFromRadio = onFromRadio
+    this.stopped = false
     signal.addEventListener('abort', () => {
       this.stopped = true
     })
@@ -242,6 +262,9 @@ class BleMeshLink implements MeshLink {
 
 class MeshtasticSession implements DeviceSession {
   private myNodeNum = 0
+  // the bus only aborts its own signal on detach, so receive gets a controller
+  // per listen run.
+  private receive: AbortController | null = null
 
   constructor(
     private link: MeshLink,
@@ -250,7 +273,7 @@ class MeshtasticSession implements DeviceSession {
   ) {}
 
   getCapabilities(): Capability[] {
-    return [CAPABILITIES.MESH_RX, CAPABILITIES.MESH_TX, CAPABILITIES.GNSS_FIX]
+    return [CAPABILITIES.MESH_RX, CAPABILITIES.MESH_TX]
   }
 
   getInfo(): Record<string, string> {
@@ -263,14 +286,18 @@ class MeshtasticSession implements DeviceSession {
 
   async start(mode: string): Promise<void> {
     if (mode !== 'listen') throw new Error(`meshtastic has no ${mode} mode`)
-    await this.link.beginReceive((p) => this.onFromRadio(p), this.ctx.signal)
+    await this.stop()
+    const receive = new AbortController()
+    this.receive = receive
+    await this.link.beginReceive((p) => this.onFromRadio(p), receive.signal)
     const nonce = (Math.floor(Math.random() * 0xfffffffe) + 1) >>> 0
     await this.link.sendToRadio(encodeWantConfig(nonce))
     this.ctx.log('listening on the mesh')
   }
 
   async stop(): Promise<void> {
-    // receive is driven by the abort signal, which the bus fires on stop.
+    this.receive?.abort()
+    this.receive = null
   }
 
   async resetToSafeState(): Promise<void> {
@@ -278,6 +305,7 @@ class MeshtasticSession implements DeviceSession {
   }
 
   async close(): Promise<void> {
+    await this.stop()
     await this.link.close()
   }
 
@@ -295,18 +323,20 @@ class MeshtasticSession implements DeviceSession {
   }
 
   private onFromRadio(payload: Uint8Array): void {
-    let msg: Map<number, DecodedField>
+    // a resync after byte loss yields a slice of a real message, which can
+    // decode at the top level and throw one level down. a throw here would
+    // unwind into the transport read loop and end reception.
     try {
-      msg = decodeMessage(payload)
+      const msg = decodeMessage(payload)
+      const myInfo = msg.get(3)
+      if (myInfo?.bytes) this.onMyInfo(myInfo.bytes)
+      const nodeInfo = msg.get(4)
+      if (nodeInfo?.bytes) this.onNodeInfo(nodeInfo.bytes)
+      const packet = msg.get(2)
+      if (packet?.bytes) this.onPacket(packet.bytes)
     } catch {
-      return // a partial or unexpected frame, drop it.
+      // a partial or unexpected frame, drop it.
     }
-    const myInfo = msg.get(3)
-    if (myInfo?.bytes) this.onMyInfo(myInfo.bytes)
-    const nodeInfo = msg.get(4)
-    if (nodeInfo?.bytes) this.onNodeInfo(nodeInfo.bytes)
-    const packet = msg.get(2)
-    if (packet?.bytes) this.onPacket(packet.bytes)
   }
 
   private onMyInfo(bytes: Uint8Array): void {
@@ -318,7 +348,7 @@ class MeshtasticSession implements DeviceSession {
     }
     const num = u32(m.get(1))
     this.myNodeNum = num
-    this.ctx.setInfo({ node: hexId(num) })
+    this.ctx.setInfo({ myNode: hexId(num) })
     this.emitPacket(bytes, { myNodeNum: num }, `my node ${hexId(num)}`)
   }
 
@@ -330,7 +360,7 @@ class MeshtasticSession implements DeviceSession {
       return
     }
     const num = u32(m.get(1))
-    const fields: Record<string, unknown> = { num }
+    const fields: Record<string, unknown> = { type: 'nodeinfo', nodeNum: num }
 
     const userField = m.get(2)
     if (userField?.bytes) {
@@ -393,7 +423,7 @@ class MeshtasticSession implements DeviceSession {
     const toLabel = to === BROADCAST ? 'all' : to === this.myNodeNum ? 'you' : hexId(to)
     this.emitPacket(
       bytes,
-      { from, to, channel, text },
+      { type: 'text', from: hexId(from), to: toLabel, channel, text },
       `${hexId(from)} to ${toLabel}: ${text}`,
       channel,
     )

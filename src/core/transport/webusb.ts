@@ -45,6 +45,10 @@ export class UsbPort {
     return this.device.productName ?? 'usb device'
   }
 
+  get productId(): number {
+    return this.device.productId
+  }
+
   async claim(opts: UsbOpenOptions): Promise<void> {
     if (!this.device.opened) await this.device.open()
     if (this.device.configuration === null) {
@@ -119,7 +123,8 @@ export class UsbPort {
   /**
    * Read a bulk endpoint continuously with several transfers in flight, so the
    * device is never waiting on the JS event loop between packets. Returns when
-   * the signal aborts or the device closes.
+   * the signal aborts or the device closes, and throws the first transfer
+   * failure so the caller can say what stopped.
    */
   async stream(
     endpoint: number,
@@ -128,29 +133,38 @@ export class UsbPort {
     onChunk: (chunk: Uint8Array) => void,
     signal: AbortSignal,
   ): Promise<void> {
-    const inflight = new Set<Promise<void>>()
+    if (signal.aborted) return
+    // a failure in one reader ends the others too, otherwise the read carries
+    // on at a fraction of its depth with nothing said.
+    const stop = new AbortController()
+    const relay = (): void => stop.abort()
+    signal.addEventListener('abort', relay)
 
     const pump = async (): Promise<void> => {
-      while (!signal.aborted && this.isOpen) {
+      while (!stop.signal.aborted && this.isOpen) {
         try {
           const chunk = await this.bulkIn(endpoint, packetSize)
           // a transfer already in flight when the signal aborts still lands
           // here. delivering it emits samples after the caller has stopped.
-          if (signal.aborted) return
+          if (stop.signal.aborted) return
           if (chunk.byteLength) onChunk(chunk)
         } catch (err) {
-          if (signal.aborted || !this.isOpen) return
+          if (stop.signal.aborted || !this.isOpen) return
+          stop.abort()
           throw err
         }
       }
     }
 
-    for (let i = 0; i < depth; i++) {
-      const p = pump()
-      inflight.add(p)
-      void p.finally(() => inflight.delete(p))
-    }
+    const readers: Array<Promise<void>> = []
+    for (let i = 0; i < depth; i++) readers.push(pump())
 
-    await Promise.allSettled([...inflight])
+    try {
+      const results = await Promise.allSettled(readers)
+      const failed = results.find((r) => r.status === 'rejected')
+      if (failed) throw (failed as PromiseRejectedResult).reason
+    } finally {
+      signal.removeEventListener('abort', relay)
+    }
   }
 }

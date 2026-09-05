@@ -79,6 +79,8 @@ interface Widget {
   id: number
   type: WidgetType
   pin: number
+  /** The pin bound before the current one, so a repin can release the old. */
+  lastPin: number
   title: string
   value: number | null
   peak: number
@@ -88,7 +90,6 @@ interface StoredWidget {
   type: WidgetType
   pin: number
   title: string
-  value: number
 }
 
 const SPECS: WidgetSpec[] = [
@@ -277,14 +278,15 @@ function canAdd(spec: WidgetSpec): boolean {
 
 // -- widget lifecycle -------------------------------------------------------
 
-function makeWidget(type: WidgetType, pin: number, title: string, value: number): Widget {
+function makeWidget(type: WidgetType, pin: number, title: string): Widget {
   const spec = specOf(type)
   return {
     id: nextId++,
     type,
     pin,
+    lastPin: pin,
     title: title || spec.label,
-    value: spec.kind === 'output' ? value : null,
+    value: spec.kind === 'output' ? 0 : null,
     peak: 0,
   }
 }
@@ -296,7 +298,7 @@ function addWidget(type: WidgetType): void {
     error.value = `no pin reports ${spec.capName}, so a ${spec.label} has nothing to bind to`
     return
   }
-  const widget = makeWidget(type, pin, spec.label, 0)
+  const widget = makeWidget(type, pin, spec.label)
   widgets.value = [...widgets.value, widget]
   note(`added ${spec.label} on ${pinName(pin)}`)
   save()
@@ -310,9 +312,33 @@ function removeWidget(id: number): void {
   scopeBuf.delete(id)
   pendingPwm.delete(id)
   inflightPwm.delete(id)
+  if (widget && specOf(widget.type).kind === 'output') void releasePin(widget, widget.pin)
   widgets.value = widgets.value.filter((w) => w.id !== id)
   if (widget) note(`removed ${widget.title}`)
   save()
+}
+
+/**
+ * Return a pin to high impedance so a repinned or removed output does not stay
+ * driven with no card. setPinMode('input') is not a driving mode, so it needs
+ * no arm and also drops the pin from the driver's driven set. A pin another
+ * widget still binds keeps its line, and a surviving input is re-activated
+ * because the pin is left in the departing output's mode.
+ */
+async function releasePin(widget: Widget, pin: number): Promise<void> {
+  const kept = widgets.value.filter((o) => o.id !== widget.id && o.pin === pin)
+  if (kept.length) {
+    for (const o of kept) if (specOf(o.type).kind === 'input') void activate(o)
+    return
+  }
+  const s = session()
+  if (!s) return
+  try {
+    await s.setPinMode(pin, 'input')
+  } catch {
+    // the board may be gone. detach reverts every driven pin anyway.
+  }
+  for (const k of [...modeApplied]) if (k.startsWith(`${pin}:`)) modeApplied.delete(k)
 }
 
 function clearAll(): void {
@@ -320,9 +346,12 @@ function clearAll(): void {
 }
 
 function onPinChange(widget: Widget): void {
+  const old = widget.lastPin
   scopeBuf.delete(widget.id)
   widget.peak = 0
   widget.value = specOf(widget.type).kind === 'output' ? 0 : null
+  if (old !== widget.pin && specOf(widget.type).kind === 'output') void releasePin(widget, old)
+  widget.lastPin = widget.pin
   note(`${widget.title} moved to ${pinName(widget.pin)}`)
   save()
   void activate(widget)
@@ -427,10 +456,15 @@ async function pressUp(widget: Widget): Promise<void> {
   }
 }
 
-function onSlider(widget: Widget, raw: string): void {
+function onSlider(widget: Widget, raw: string, el: HTMLInputElement): void {
+  if (!requireArm(`driving ${pinName(widget.pin)} with pwm`)) {
+    // :value is one-way, so an unchanged model leaves the thumb where the drag
+    // put it. Snap it back so the card never shows a level the pin was not set to.
+    el.value = String(widget.value ?? 0)
+    return
+  }
   const value = Math.max(0, Math.min(PWM_MAX, Number.parseInt(raw, 10) || 0))
   widget.value = value
-  if (!requireArm(`driving ${pinName(widget.pin)} with pwm`)) return
   pendingPwm.set(widget.id, value)
   void flushSlider(widget)
 }
@@ -450,6 +484,8 @@ async function flushSlider(widget: Widget): Promise<void> {
     if (s) {
       await ensureMode(s, widget)
       await s.writePin(widget.pin, value)
+    } else {
+      error.value = 'this device is no longer attached'
     }
   } catch (err) {
     fail(widget, err)
@@ -582,7 +618,6 @@ function save(): void {
     type: w.type,
     pin: w.pin,
     title: w.title,
-    value: w.type === 'slider' ? (w.value ?? 0) : 0,
   }))
   try {
     localStorage.setItem(storeKey.value, JSON.stringify({ widgets: stored }))
@@ -617,7 +652,7 @@ function load(): void {
       dropped++
       continue
     }
-    restored.push(makeWidget(stored.type, stored.pin, stored.title, stored.value))
+    restored.push(makeWidget(stored.type, stored.pin, stored.title))
   }
   widgets.value = restored
   if (restored.length) note(`restored ${restored.length} widgets saved for this board`)
@@ -731,7 +766,23 @@ watch(permissive, (on) => note(`permissive ${on ? 'on, every pin is offered' : '
 
 watch(armedGpio, (on) => {
   if (!on) {
-    modeApplied.clear()
+    // an unarmed pin must not stay hot behind a card the panel can no longer
+    // write to. a pin an input widget also binds keeps its reading mode.
+    const s = session()
+    const outputPins = new Set<number>()
+    const inputPins = new Set<number>()
+    for (const w of widgets.value) {
+      if (specOf(w.type).kind === 'output') outputPins.add(w.pin)
+      else inputPins.add(w.pin)
+    }
+    for (const pin of outputPins) {
+      if (inputPins.has(pin)) continue
+      for (const k of [...modeApplied]) if (k.startsWith(`${pin}:`)) modeApplied.delete(k)
+      if (s) void s.setPinMode(pin, 'input').catch(() => undefined)
+    }
+    for (const w of widgets.value) {
+      if (specOf(w.type).kind === 'input' && outputPins.has(w.pin)) void activate(w)
+    }
     return
   }
   armPrompt.value = null
@@ -794,8 +845,8 @@ onBeforeUnmount(() => {
       <div v-else-if="!armedGpio" class="bn-banner is-warn">
         <HbIcon name="warning" />
         <span>
-          reads are live. switches, buttons, sliders, modules, and i2c writes stay off until you arm
-          gpio drive, since an output fighting something already driving the line damages both.
+          reads are live. switches, buttons, sliders, and modules stay off until you arm gpio drive,
+          since an output fighting something already driving the line damages both.
         </span>
       </div>
 
@@ -950,7 +1001,7 @@ onBeforeUnmount(() => {
                 step="1"
                 :value="w.value ?? 0"
                 :aria-label="`${w.title} duty`"
-                @input="onSlider(w, ($event.target as HTMLInputElement).value)"
+                @input="onSlider(w, ($event.target as HTMLInputElement).value, $event.target as HTMLInputElement)"
               />
               <div class="bn-wscale">
                 <span>0</span><span>128</span><span>{{ PWM_MAX }}</span>
@@ -1052,8 +1103,9 @@ onBeforeUnmount(() => {
                 <span v-if="!addresses.length" class="bn-chipx">nothing found yet</span>
               </div>
               <p class="bn-note">
-                the scan reads one byte from every address from 0x08 to 0x77. writing to a device
-                needs bus drive armed, which is {{ armedBus ? 'on' : 'off' }}.
+                the scan reads one byte from every address from 0x08 to 0x77. this panel does not
+                write to i2c devices. bus drive, armed from the device's control plane, is
+                {{ armedBus ? 'on' : 'off' }}.
               </p>
             </template>
           </div>

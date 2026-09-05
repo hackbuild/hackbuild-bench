@@ -32,6 +32,18 @@ export function prefersReducedMotion(): boolean {
   return window.matchMedia('(prefers-reduced-motion: reduce)').matches
 }
 
+/**
+ * Calls back when the reduced motion setting changes, and returns a disposer.
+ *
+ * The setting can be turned on part way through a session, and an animation
+ * already running has no other way to hear about it.
+ */
+export function onReducedMotion(cb: () => void): () => void {
+  const query = window.matchMedia('(prefers-reduced-motion: reduce)')
+  query.addEventListener('change', cb)
+  return () => query.removeEventListener('change', cb)
+}
+
 export interface Screen {
   ctx: CanvasRenderingContext2D
   /** Drawing width and height in the units the transform was set up for. */
@@ -72,14 +84,37 @@ export function fitCanvas(canvas: HTMLCanvasElement, scale: boolean): Screen | n
   return { ctx, w: dw, h: dh, dpr, resized }
 }
 
-/** Waterfall colormap: black to blue to green to yellow to white. */
+function byte(v: number): number {
+  return Math.max(0, Math.min(255, v)) | 0
+}
+
+/**
+ * Waterfall colormap: black to red to magenta to orange to yellow.
+ *
+ * The floor stays dark. A lifted floor buries the noise floor a carrier reads
+ * against. Values come from the readouts, not the colour.
+ */
 export function heat(v: number): [number, number, number] {
   const t = Math.max(0, Math.min(1, v))
-  return [
-    Math.min(255, t * 3 * 255) | 0,
-    Math.max(0, (t - 0.35) * 2.2 * 255) | 0,
-    (t < 0.5 ? t * 2 * 160 : (1 - t) * 2 * 230) | 0,
-  ]
+  // both blue branches have to meet at t = 0.5. a step there draws a contour
+  // across the picture wherever a signal crosses mid window.
+  const b = t < 0.5 ? t * 2 * 160 : (1 - t) * 2 * 160
+  return [byte(t * 3 * 255), byte((t - 0.35) * 2.2 * 255), byte(b)]
+}
+
+/**
+ * Strongest bin in the slice of `bins` that falls on output column `x` of `w`.
+ *
+ * A stitched sweep hands over far more bins than the display has columns, so a
+ * point sample drops carriers that are only a few bins wide.
+ */
+export function peakAt(bins: Float32Array, x: number, w: number): number {
+  if (!bins.length) return -Infinity
+  const lo = Math.min(bins.length - 1, Math.floor((x / w) * bins.length))
+  const hi = Math.min(bins.length, Math.max(lo + 1, Math.floor(((x + 1) / w) * bins.length)))
+  let v = -Infinity
+  for (let i = lo; i < hi; i++) if (bins[i] > v) v = bins[i]
+  return Number.isFinite(v) ? v : bins[lo]
 }
 
 /** Maps a dB magnitude onto 0 to 1 across the display window. */
@@ -87,6 +122,56 @@ export function normalise(db: number, minDb: number, maxDb: number): number {
   const span = maxDb - minDb
   if (!(span > 0) || !Number.isFinite(db)) return 0
   return Math.max(0, Math.min(1, (db - minDb) / span))
+}
+
+/** A press that travels less than this many CSS pixels counts as a tap. */
+export const SLOP = 4
+
+/** Marker movement per arrow key and per page key, as a fraction of the width. */
+export const KEY_STEP = 0.01
+export const PAGE_STEP = 0.1
+
+/** Width of the keyboard handle that stands in for the marker, in CSS pixels. */
+export const HANDLE_PX = 24
+
+export function clamp01(v: number): number {
+  return Math.max(0, Math.min(1, v))
+}
+
+/** 1 or -1 for an arrow key that moves the marker, 0 for anything else. */
+export function arrowStep(key: string): number {
+  if (key === 'ArrowRight' || key === 'ArrowUp') return 1
+  if (key === 'ArrowLeft' || key === 'ArrowDown') return -1
+  return 0
+}
+
+/** Where a marker key puts the marker, null when the key moves no marker. */
+export function markerKeyTarget(key: string, centre: number): number | null {
+  const dir = arrowStep(key)
+  if (dir) return clamp01(centre + dir * KEY_STEP)
+  if (key === 'Home') return 0
+  if (key === 'End') return 1
+  if (key === 'PageUp') return clamp01(centre + PAGE_STEP)
+  if (key === 'PageDown') return clamp01(centre - PAGE_STEP)
+  return null
+}
+
+/** Spoken form of the marker, since the picture it sits on carries no text. */
+export function markerReadout(marker: number | null, width: number): string {
+  const at = ((marker ?? 0.5) * 100).toFixed(1)
+  const wide = ((width ?? 0) * 100).toFixed(1)
+  return `listening ${at}% across the window, ${wide}% wide`
+}
+
+/**
+ * Left edge of the handle, centred on the marker.
+ *
+ * The shell clips its overflow, so a handle hanging past either end makes it a
+ * scroll container and focusing the handle slides the picture sideways.
+ */
+export function handleLeft(marker: number): string {
+  const half = HANDLE_PX / 2
+  return `clamp(0px, calc(${marker * 100}% - ${half}px), calc(100% - ${HANDLE_PX}px))`
 }
 
 /** Value of the placeholder spectrum at x, used until hardware is streaming. */
@@ -123,15 +208,16 @@ export class AutoRange {
     if (!bins.length) return { minDb: this.floor ?? -100, maxDb: this.ceil ?? -10 }
 
     // a strided sample is enough to find the noise floor and costs far less
-    // than sorting every bin on every frame.
+    // than sorting every bin. the peak has to see every bin, since a carrier
+    // can be one bin wide and the ceiling has to clear what the trace draws.
     const stride = Math.max(1, Math.floor(bins.length / 256))
     const sample: number[] = []
     let peak = -Infinity
-    for (let i = 0; i < bins.length; i += stride) {
+    for (let i = 0; i < bins.length; i++) {
       const v = bins[i]
       if (!Number.isFinite(v)) continue
-      sample.push(v)
       if (v > peak) peak = v
+      if (i % stride === 0) sample.push(v)
     }
     if (!sample.length || !Number.isFinite(peak)) {
       return { minDb: this.floor ?? -100, maxDb: this.ceil ?? -10 }

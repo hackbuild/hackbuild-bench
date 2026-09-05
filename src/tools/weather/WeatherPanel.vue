@@ -162,17 +162,17 @@ onBeforeUnmount(() => {
     </div>
 
     <div class="bn-img" :class="{ 'is-native': native }" style="margin-top: 10px">
-      <canvas ref="full" width="2080" height="16" aria-label="full apt frame" />
+      <canvas ref="full" width="2080" height="16" role="img" aria-label="full apt frame" />
       <span class="bn-imgtag">both channels, 2080 words a line</span>
     </div>
 
     <div class="bn-imgrow">
       <div class="bn-img">
-        <canvas ref="chanA" width="909" height="16" aria-label="apt channel a" />
+        <canvas ref="chanA" width="909" height="16" role="img" aria-label="apt channel a" />
         <span class="bn-imgtag">channel a</span>
       </div>
       <div class="bn-img">
-        <canvas ref="chanB" width="909" height="16" aria-label="apt channel b" />
+        <canvas ref="chanB" width="909" height="16" role="img" aria-label="apt channel b" />
         <span class="bn-imgtag">channel b</span>
       </div>
     </div>
@@ -186,7 +186,7 @@ onBeforeUnmount(() => {
       <HbIcon name="satellite" :size="15" />
       <div>
         <b>what a real pass takes</b>
-        noaa 15, 18, and 19 send apt on 137.100, 137.9125, and 137.100 MHz, wide fm. you need
+        noaa 15, 18, and 19 send apt on 137.620, 137.9125, and 137.100 MHz, wide fm. you need
         the satellite above the horizon and an antenna that can see it, normally a turnstile
         or a v dipole, since a whip on a desk gets you noise. the picture builds through the
         whole pass at two lines a second, so around 1200 lines over ten minutes, and it fades

@@ -28,8 +28,6 @@ const PATH_INFO = '/api/system/info'
 const PATH_SCAN = '/api/recon/scan'
 const PATH_APS = '/api/recon/aps'
 const PATH_CLIENTS = '/api/recon/clients'
-const PATH_PINEAP = '/api/pineap/settings'
-const PATH_DEAUTH = '/api/recon/deauth'
 
 export interface PineappleAccess {
   base: string
@@ -67,7 +65,7 @@ const descriptor: DeviceDescriptor = {
   blurb: 'recon on the network you run, over its rest api',
   icon: 'wifi',
   transports: ['http'],
-  capabilities: [CAPABILITIES.NET_SURVEY, CAPABILITIES.NET_ATTACK],
+  capabilities: [CAPABILITIES.NET_SURVEY],
   params: [],
   accessFields: [
     {
@@ -125,7 +123,7 @@ class PineappleSession implements DeviceSession {
   }
 
   getCapabilities(): Capability[] {
-    return [CAPABILITIES.NET_SURVEY, CAPABILITIES.NET_ATTACK]
+    return [CAPABILITIES.NET_SURVEY]
   }
 
   getInfo(): Record<string, string> {
@@ -162,24 +160,6 @@ class PineappleSession implements DeviceSession {
     } catch {
       return false
     }
-  }
-
-  /** Turn PineAP on or off. Acts on nearby clients, so it needs wifi active armed. */
-  async setPineAp(enabled: boolean): Promise<void> {
-    if (!this.ctx.isArmed(CAPABILITIES.NET_ATTACK)) {
-      throw new Error('wifi active is not armed. arm wifi active to change pineap.')
-    }
-    await this.endpoint.post(PATH_PINEAP, { enabled })
-    this.ctx.log(`pineap ${enabled ? 'on' : 'off'}`)
-  }
-
-  /** Deauthenticate a client. Acts on a client, so it needs wifi active armed. */
-  async deauthClient(mac: string): Promise<void> {
-    if (!this.ctx.isArmed(CAPABILITIES.NET_ATTACK)) {
-      throw new Error('wifi active is not armed. arm wifi active to act on clients.')
-    }
-    await this.endpoint.post(PATH_DEAUTH, { mac })
-    this.ctx.log(`deauth ${mac}`)
   }
 
   private async surveyLoop(): Promise<void> {

@@ -1,6 +1,6 @@
 import type { Capability } from '@/core/capabilities'
 import type { DeviceBus } from '@/core/bus/DeviceBus'
-import type { DeviceSession } from '@/core/drivers/types'
+import type { DeviceSession, TransmitFrameOptions } from '@/core/drivers/types'
 import type { Artifact, DeviceNode } from '@/core/types'
 
 /**
@@ -80,9 +80,14 @@ export interface CollectRequest {
 export interface PlaybookRule {
   trigger: { kind: string; detail: string; deviceId?: string; match?: string }
   condition: { kind: string; detail: string; minGapMs?: number }
-  action: { kind: string; detail: string; deviceId?: string }
-  /** What the rule does when it fires. */
-  perform?: () => Promise<void>
+  action: {
+    kind: string
+    detail: string
+    deviceId?: string
+    /** The pin a pin action drives, and the level it drives it to. */
+    pin?: number
+    level?: number
+  }
 }
 
 /**
@@ -119,6 +124,7 @@ export interface PlaybookContext {
 // ---------------------------------------------------------------------------
 
 export interface FrameTransmitSession extends DeviceSession {
+  transmitFrame?(bytes: Uint8Array, opts?: TransmitFrameOptions): Promise<void>
   replayFrame?(bytes: Uint8Array): Promise<void>
   transmit?(bytes: Uint8Array): Promise<void>
 }

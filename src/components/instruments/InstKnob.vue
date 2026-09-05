@@ -57,7 +57,7 @@ function onSelect(event: Event): void {
   <div class="bn-knob">
     <label class="bn-klabel" :for="id">
       {{ spec.label }}
-      <b>{{ shown }}</b>
+      <b aria-hidden="true">{{ shown }}</b>
     </label>
 
     <select

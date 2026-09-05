@@ -10,10 +10,9 @@ import type { DemoAudioSource } from '@/core/decode/demo'
 /**
  * The audio side of a decoder panel.
  *
- * Two things can feed a decoder. A radio that produces IQ goes through the
- * receive chain and the decoder taps the same samples the speakers get, so
- * audio is demodulated once. A device that already emits audio artifacts is
- * read straight off the bus.
+ * Audio reaches the decoder as audio artifacts on the bus, whatever produced
+ * it. A radio that produces IQ goes through the receive chain, which re-emits
+ * its demodulated audio onto the bus, so one block is never fed twice.
  *
  * A simulated device has nothing on the air, so when one is focused the panel
  * runs a synthetic transmission through the same decoder instead. The demo
@@ -49,7 +48,6 @@ export function useDecodeAudio(deviceId: string, opts: DecodeAudioOptions) {
   const isSim = computed(() => (node.value ? isSimKind(node.value.kind) : false))
   const running = computed(() => live.value || demoRunning.value)
 
-  let untap: (() => void) | null = null
   let timer = 0
   let source: DemoAudioSource | null = null
 
@@ -62,12 +60,7 @@ export function useDecodeAudio(deviceId: string, opts: DecodeAudioOptions) {
   watch(
     rx.sink,
     (sink) => {
-      untap?.()
-      untap = null
-      if (sink) {
-        sink.setMuted(muted.value)
-        untap = sink.tap((samples, rate) => opts.onAudio(samples, rate))
-      }
+      sink?.setMuted(muted.value)
     },
     { immediate: true },
   )
@@ -133,7 +126,6 @@ export function useDecodeAudio(deviceId: string, opts: DecodeAudioOptions) {
 
   onBeforeUnmount(() => {
     stopBus()
-    untap?.()
     stopDemo()
     void rx.stop()
   })

@@ -13,6 +13,7 @@ import { useReceiver } from '@/composables/useReceiver'
 import { isSimKind } from '@/core/drivers/sim/simulate'
 import { formatHz, formatRate } from '@/core/format'
 import type { DeviceToolProps } from '@/tools/types'
+import type { ParamSpec } from '@/core/types'
 import type { DemodMode } from '@/core/dsp/demod'
 
 const props = defineProps<DeviceToolProps>()
@@ -99,14 +100,49 @@ function paramModel(key: string) {
   })
 }
 
-const gain = paramModel('gain')
-const volume = paramModel('volume')
-const squelch = paramModel('squelch')
-const ppm = paramModel('ppm')
 const sampleRate = paramModel('sampleRate')
 
+/** Volume is a property of the audio sink, so no driver declares it. */
+const VOLUME: ParamSpec = { key: 'volume', label: 'volume', min: 0, max: 100, step: 1, default: 72 }
+const volume = ref(VOLUME.default)
+
+// centerHz is the dial, volume belongs to the sink, squelch is read by nothing
+// in the receive path, and the transmit gain and the sweep range drive other
+// panels rather than this one.
+const HIDDEN = ['centerHz', 'volume', 'squelch', 'txvga', 'sweepLowHz', 'sweepHighHz']
+/** The receive gain, whatever a given radio calls it. Easy mode shows these. */
+const GAINS = ['gain', 'lna', 'vga']
+
+const knobs = computed(() =>
+  params.value.filter(
+    (p) => !HIDDEN.includes(p.key) && (bench.advanced || GAINS.includes(p.key)),
+  ),
+)
+
+const gains = computed(() => params.value.filter((p) => GAINS.includes(p.key)))
+
+// the rtl-sdr driver hands the top of the gain range to the tuner's own agc,
+// so the number at that end is not the gain the radio is running.
+function readout(p: ParamSpec): string {
+  const v = node.value?.params[p.key] ?? p.default
+  if (p.key === 'gain' && v >= p.max) return 'auto'
+  return p.unit ? `${v} ${p.unit}` : `${v}`
+}
+
+const centerSpec = computed(() => spec('centerHz'))
+
+function reachable(hz: number): boolean {
+  const s = centerSpec.value
+  return !s || (hz >= s.min && hz <= s.max)
+}
+
+const bands = computed(() => BANDS.filter((b) => reachable(b.hz)))
+const unreachable = computed(() => BANDS.filter((b) => !reachable(b.hz)).map((b) => b.label))
+const pool = computed(() => ROLLS.filter((r) => reachable(r.hz)))
+
 function tune(hz: number): void {
-  centerHz.value = hz
+  const s = centerSpec.value
+  centerHz.value = s ? Math.min(s.max, Math.max(s.min, hz)) : hz
 }
 
 function nudge(dir: number): void {
@@ -120,8 +156,9 @@ function pickBand(b: (typeof BANDS)[number]): void {
 }
 
 function roll(): void {
+  if (!pool.value.length) return
   rolling.value = true
-  const pick = ROLLS[Math.floor(Math.random() * ROLLS.length)]
+  const pick = pool.value[Math.floor(Math.random() * pool.value.length)]
   setTimeout(() => {
     rolling.value = false
     found.value = { name: pick.name, note: pick.note }
@@ -131,6 +168,8 @@ function roll(): void {
 
 async function listen(): Promise<void> {
   await rx.start()
+  // the sink is built by start(), so the knob's position is applied after it.
+  rx.setVolume(volume.value / 100)
 }
 
 async function letGo(): Promise<void> {
@@ -141,6 +180,8 @@ watch(
   () => rx.mode.value,
   (m) => rx.applyMode(m),
 )
+
+watch(volume, (v) => rx.setVolume(v / 100))
 
 onBeforeUnmount(() => {
   void rx.stop()
@@ -162,9 +203,9 @@ onBeforeUnmount(() => {
         <div class="bn-k">mode</div>
         <div class="bn-v">{{ rx.mode.value }}</div>
       </div>
-      <div>
-        <div class="bn-k">gain</div>
-        <div class="bn-v is-goo">{{ gain >= 49 ? 'auto' : gain }}</div>
+      <div v-for="p in gains" :key="p.key">
+        <div class="bn-k">{{ p.label }}</div>
+        <div class="bn-v is-goo">{{ readout(p) }}</div>
       </div>
       <div>
         <div class="bn-k">sig</div>
@@ -188,18 +229,24 @@ onBeforeUnmount(() => {
       </div>
     </div>
 
-    <div v-if="!bench.advanced" class="bn-pills">
+    <div v-if="!bench.advanced" class="bn-packs" role="group" aria-label="band presets">
       <button
-        v-for="b in BANDS"
+        v-for="b in bands"
         :key="b.label"
         type="button"
-        class="bn-pill"
+        class="bn-pack"
         :class="{ 'is-on': Math.abs(centerHz - b.hz) < 1000 }"
+        :aria-pressed="Math.abs(centerHz - b.hz) < 1000"
         @click="pickBand(b)"
       >
         {{ b.label }}
       </button>
     </div>
+
+    <p v-if="!bench.advanced && unreachable.length && centerSpec" class="bn-note" style="margin-top: 0">
+      outside what this radio tunes: {{ unreachable.join(', ') }}. it covers
+      {{ formatHz(centerSpec.min) }} to {{ formatHz(centerSpec.max) }}.
+    </p>
 
     <div class="bn-dial">
       <div class="bn-digits">
@@ -207,14 +254,10 @@ onBeforeUnmount(() => {
       </div>
       <button class="bn-rbtn" type="button" aria-label="tune down" @click="nudge(-1)">&#9668;</button>
       <button class="bn-rbtn" type="button" aria-label="tune up" @click="nudge(1)">&#9658;</button>
-      <button
-        class="bn-surprise"
-        :class="{ 'is-rolling': rolling }"
-        type="button"
-        @click="roll"
-      >
-        <HbIcon name="dice" :size="15" />surprise me
-      </button>
+      <HbButton size="sm" :loading="rolling" :disabled="!pool.length" @click="roll">
+        <template #icon><HbIcon name="dice" /></template>
+        surprise me
+      </HbButton>
       <HbButton v-if="!streaming" variant="danger" size="sm" @click="listen">
         <template #icon><HbIcon name="play" /></template>
         listen
@@ -225,13 +268,17 @@ onBeforeUnmount(() => {
       </HbButton>
     </div>
 
+    <p v-if="!pool.length" class="bn-note" style="margin-top: 0">
+      surprise me is off: nothing on its list is inside what this radio tunes.
+    </p>
+
     <div v-if="found" class="bn-found">
       <HbIcon class="bn-fi" name="dice" :size="22" />
       <div class="bn-fx">
         <b>{{ found.name }}</b>
         <div>{{ found.note }}</div>
       </div>
-      <HbButton variant="danger" size="sm" @click="listen">
+      <HbButton size="sm" @click="listen">
         <template #icon><HbIcon name="play" /></template>
         listen
       </HbButton>
@@ -240,12 +287,13 @@ onBeforeUnmount(() => {
     <div class="bn-knobs">
       <div class="bn-knob">
         <span class="bn-klabel">demod</span>
-        <div class="bn-seg2">
+        <div class="bn-seg2" role="group" aria-label="demodulator">
           <button
             v-for="m in DEMODS"
             :key="m"
             type="button"
             :class="{ 'is-on': rx.mode.value === m }"
+            :aria-pressed="rx.mode.value === m"
             @click="rx.setMode(m)"
           >
             {{ m }}
@@ -253,19 +301,8 @@ onBeforeUnmount(() => {
         </div>
       </div>
 
-      <InstKnob v-if="spec('volume')" v-model="volume" :spec="spec('volume')!" />
-      <InstKnob v-if="spec('gain')" v-model="gain" :spec="spec('gain')!" />
-      <InstKnob
-        v-if="bench.advanced && spec('squelch')"
-        v-model="squelch"
-        :spec="spec('squelch')!"
-      />
-      <InstKnob
-        v-if="bench.advanced && spec('sampleRate')"
-        v-model="sampleRate"
-        :spec="spec('sampleRate')!"
-      />
-      <InstKnob v-if="bench.advanced && spec('ppm')" v-model="ppm" :spec="spec('ppm')!" />
+      <InstKnob v-model="volume" :spec="VOLUME" />
+      <InstKnob v-for="p in knobs" :key="p.key" v-model="paramModel(p.key).value" :spec="p" />
     </div>
 
     <InstSmeter :db="rx.signalDb.value" />
@@ -309,7 +346,7 @@ onBeforeUnmount(() => {
 
     <p v-if="!bench.advanced" class="bn-note">
       easy mode keeps the presets and the few knobs that matter. switch to advanced for
-      squelch, sample rate, and the tuner correction.
+      the sample rate and the rest of what this radio exposes.
     </p>
   </div>
 </template>

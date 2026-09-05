@@ -250,7 +250,8 @@ export function ookFrame(
     Math.min(Math.floor(perBit / 4), Math.round((opts.edgeSeconds ?? 20e-6) * sampleRate)),
   )
 
-  const out = new Float32Array(bits.length * perBit * 2)
+  // room for the closing ramp, which runs past the last bit period.
+  const out = new Float32Array((bits.length * perBit + edge) * 2)
   let prev = 0
   for (let b = 0; b < bits.length; b++) {
     const on = bits[b] ? 1 : 0
@@ -265,6 +266,14 @@ export function ookFrame(
       out[idx + 1] = 0
     }
     prev = on
+  }
+  if (!prev) return out.subarray(0, bits.length * perBit * 2)
+
+  const tail = bits.length * perBit
+  for (let i = 0; i < edge; i++) {
+    const idx = (tail + i) * 2
+    out[idx] = (0.5 + 0.5 * Math.cos((Math.PI * (i + 1)) / edge)) * peak
+    out[idx + 1] = 0
   }
   return out
 }

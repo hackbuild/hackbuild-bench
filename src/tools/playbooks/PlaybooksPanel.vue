@@ -99,9 +99,11 @@ const settled = computed(() => {
   return runner.settled
 })
 
-const blockedText = computed(() =>
-  runner.blocked.map((s) => `${s.step.title} ${s.readiness.reason}`).join('. '),
-)
+const blockedText = computed(() => {
+  void version.value
+  void devices.nodes
+  return runner.blocked.map((s) => `${s.step.title} ${s.readiness.reason}`).join('. ')
+})
 
 function open(pb: Playbook): void {
   runner.start(pb)
@@ -234,7 +236,10 @@ function stepDisabled(s: StepStatus): boolean {
             style="align-items: flex-start"
           >
             <span class="bn-n"></span>
-            <span class="bn-t" style="font-weight: 400; color: var(--hb-ink-3)">
+            <span
+              class="bn-t"
+              style="font-weight: 400; color: var(--hb-ink-3); min-width: 0; overflow-wrap: anywhere"
+            >
               <span
                 v-for="(line, i) in summaryFor(s.step)"
                 :key="i"
@@ -302,7 +307,7 @@ function stepDisabled(s: StepStatus): boolean {
             <div v-if="summaryFor(s.step).length" style="margin-top: 12px">
               <div class="bn-subhead">what it found</div>
               <div v-for="(line, i) in summaryFor(s.step)" :key="i" class="bn-op">
-                <span class="bn-t">{{ line }}</span>
+                <span class="bn-t" style="min-width: 0; overflow-wrap: anywhere">{{ line }}</span>
               </div>
             </div>
 

@@ -27,12 +27,19 @@ class BenchSinkProcessor extends AudioWorkletProcessor {
     this.write = 0
     this.avail = 0
     this.dropped = 0
+    // hold silent until this much is buffered, so ordinary jitter does not
+    // empty the ring on the first quantum and click.
+    this.target = Math.min(opts.target || Math.round(sampleRate * 0.1), (this.cap / 2) | 0)
+    this.primed = false
+    this.starve = 0
     this.port.onmessage = (event) => {
       const data = event.data
       if (data === 'flush') {
         this.read = 0
         this.write = 0
         this.avail = 0
+        this.primed = false
+        this.starve = 0
         return
       }
       const s = data
@@ -60,14 +67,29 @@ class BenchSinkProcessor extends AudioWorkletProcessor {
     if (!out || out.length === 0) return true
     const ch = out[0]
     const n = ch.length
+    if (!this.primed) {
+      if (this.avail >= this.target) this.primed = true
+      else { ch.fill(0); return true }
+    }
     if (this.avail >= n) {
       for (let i = 0; i < n; i++) {
         ch[i] = this.buf[this.read]
         this.read = (this.read + 1) % this.cap
       }
       this.avail -= n
+      this.starve = 0
     } else {
-      ch.fill(0)
+      const have = this.avail
+      for (let i = 0; i < have; i++) {
+        ch[i] = this.buf[this.read]
+        this.read = (this.read + 1) % this.cap
+      }
+      for (let i = have; i < n; i++) ch[i] = 0
+      this.avail -= have
+      this.starve++
+      // a single short quantum is a gap; sustained starvation rebuilds the
+      // prebuffer instead of clicking every quantum.
+      if (this.starve * n >= this.target) { this.primed = false; this.starve = 0 }
     }
     for (let c = 1; c < out.length; c++) out[c].set(ch)
     return true
@@ -149,6 +171,7 @@ export class AudioSink {
   private capacitySeconds: number
   private volume: number
   private droppedCount = 0
+  private fbPrimed = false
 
   /** Silences output without tearing down the graph or the ring. */
   muted = false
@@ -246,6 +269,7 @@ export class AudioSink {
   /** Drop everything queued. Used on a mode change so stale audio does not play. */
   flush(): void {
     this.ring.clear()
+    this.fbPrimed = false
     this.worklet?.port.postMessage('flush')
   }
 
@@ -320,10 +344,19 @@ export class AudioSink {
       }
     }
 
+    const fbTarget = Math.round(ctx.sampleRate * 0.1)
+    this.fbPrimed = false
     const node = ctx.createScriptProcessor(4096, 1, 1)
     node.onaudioprocess = (event) => {
       const out = event.outputBuffer.getChannelData(0)
-      this.ring.pull(out)
+      if (!this.fbPrimed) {
+        if (this.ring.length >= fbTarget) this.fbPrimed = true
+        else {
+          out.fill(0)
+          return
+        }
+      }
+      if (!this.ring.pull(out) && this.ring.length === 0) this.fbPrimed = false
     }
     node.connect(gain)
     this.fallback = node

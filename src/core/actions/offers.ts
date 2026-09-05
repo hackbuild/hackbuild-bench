@@ -7,11 +7,10 @@ import type { Artifact, DeviceNode, PacketRecord } from '@/core/types'
  * What else the bench could do with this thing.
  *
  * An offer is produced by matching an artifact against the capabilities
- * currently on the bus. A captured frame becomes replayable the moment a
- * transmit capable radio is connected, without the panel that captured it
- * knowing anything about transmitting. This is where interoperability lives:
- * add a device that provides a capability and every panel that produces a
- * matching artifact gains the action.
+ * currently on the bus, so a device that provides a capability gives the action
+ * to every panel that produces a matching artifact. A captured frame becomes
+ * replayable the moment a transmit capable radio is connected, without the
+ * panel that captured it knowing anything about transmitting.
  */
 
 export interface Offer {
@@ -65,8 +64,7 @@ export function offersFor(artifact: Artifact, ctx: OfferContext): Offer[] {
       out.push({
         id: `replay:${node.id}`,
         label: `replay through ${node.label}`,
-        detail:
-          'parses the frame, shows you the bytes going out, then sends that parsed frame rather than a blind copy of the capture',
+        detail: 'shows you the bytes first, then keys them out on this radio',
         icon: 'tower-broadcast',
         target: node,
         arms: CAPABILITIES.TRANSMIT_RF,
@@ -115,21 +113,6 @@ export function offersFor(artifact: Artifact, ctx: OfferContext): Offer[] {
     }
   }
 
-  if (artifact.kind === 'iq') {
-    for (const node of ctx.bus.providers(CAPABILITIES.TRANSMIT_RF)) {
-      out.push({
-        id: `retransmit:${node.id}`,
-        label: `retransmit on ${node.label}`,
-        detail:
-          'sends this capture back out. run it through the frame parser first if you want to see what you are emitting',
-        icon: 'satellite-dish',
-        target: node,
-        arms: CAPABILITIES.TRANSMIT_RF,
-        armed: isArmed(node, CAPABILITIES.TRANSMIT_RF),
-      })
-    }
-  }
-
   return out
 }
 
@@ -151,13 +134,15 @@ const CAPABILITY_EXAMPLES: Partial<Record<Capability, string>> = {
 
 export function missingOffersFor(artifact: Artifact, bus: DeviceBus): MissingOffer[] {
   const out: MissingOffer[] = []
-  if (artifact.kind !== 'packet' && artifact.kind !== 'iq') return out
+  // only a packet carries bytes a radio can key out, so only a packet may
+  // promise what connecting one would add.
+  if (artifact.kind !== 'packet') return out
 
   const wanted: Array<[Capability, string]> = [
     [CAPABILITIES.TRANSMIT_RF, 'replay this'],
     [CAPABILITIES.GPIO_DRIVE, 'make something react to this'],
   ]
-  if (artifact.kind === 'packet' && (artifact as PacketRecord).proto === 'ble') {
+  if ((artifact as PacketRecord).proto === 'ble') {
     wanted.push([CAPABILITIES.CONNECT_GATT, 'connect to this device'])
   }
 

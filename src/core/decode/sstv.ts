@@ -289,6 +289,11 @@ export class SstvDecoder {
     // a vis leader sits at 1900. rejecting it stops a header being mistaken
     // for a line sync, which would shred the first second of the picture.
     if (Math.abs(before - 1900) < 110) return false
+    // a sync pulse is followed by porch and picture, which never go below the
+    // 1500 Hz black tone. a vis bit is followed by another bit at 1100 or
+    // 1300, so the bit train cannot start a picture halfway through itself.
+    const after = this.trace.mean(t + this.ms(mode.syncMs + 0.6), t + this.ms(mode.syncMs + 3))
+    if (after < 1400) return false
     this.begin(mode, this.refineEdge(t))
     return true
   }

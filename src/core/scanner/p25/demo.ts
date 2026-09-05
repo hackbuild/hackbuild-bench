@@ -22,21 +22,20 @@ export class DemoControlChannel {
     // put base near the system's control channel so grants land in-window.
     const baseHz = this.system.sites[0]?.controlHz[0] ?? 770e6
     const baseUnit = Math.round(baseHz / 5)
-    // iden 1, bandwidth 12.5k, spacing 12.5k (100 x 125), offset +45 MHz form.
-    const p = new Uint8Array(8)
+    // iden 1, bandwidth 12.5k, spacing 12.5k (100 x 125), offset -45 MHz.
     const iden = 1
     const bw = 100
-    p[0] = (iden << 4) | ((bw >> 5) & 0xf)
-    p[1] = ((bw & 0x1f) << 3) | (0 << 2) | ((0 >> 12) & 0x3)
     const offMag = 180
-    p[1] = ((bw & 0x1f) << 3) | (0 << 2) | ((offMag >> 12) & 0x3)
-    p[2] = (offMag >> 4) & 0xff
     const spacing = 100
-    p[3] = ((offMag & 0xf) << 4) | ((spacing >> 6) & 0xf)
-    p[4] = ((spacing & 0x3f) << 2) | ((baseUnit >> 30) & 0x3)
-    p[5] = (baseUnit >> 22) & 0xff
-    p[6] = (baseUnit >> 14) & 0xff
-    p[7] = (baseUnit >> 6) & 0xff
+    const p = new Uint8Array(8)
+    p[0] = (iden << 4) | ((bw >> 5) & 0xf)
+    p[1] = ((bw & 0x1f) << 3) | ((offMag >> 6) & 0x3)
+    p[2] = ((offMag & 0x3f) << 2) | ((spacing >> 8) & 0x3)
+    p[3] = spacing & 0xff
+    p[4] = (baseUnit >>> 24) & 0xff
+    p[5] = (baseUnit >>> 16) & 0xff
+    p[6] = (baseUnit >>> 8) & 0xff
+    p[7] = baseUnit & 0xff
     return this.frame(0x3d, 0x00, p)
   }
 

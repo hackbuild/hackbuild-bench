@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, ref, shallowRef, watch } from 'vue'
+import { computed, onBeforeUnmount, ref, shallowRef, useId, watch } from 'vue'
 import { HbButton, HbIcon } from '@virgilvox/hackbuild-ui'
 import type { IconName } from '@virgilvox/hackbuild-ui'
 import ArmDialog from '@/components/bench/ArmDialog.vue'
@@ -70,8 +70,36 @@ const progress = ref(0)
 const error = ref<string | null>(null)
 const armOpen = ref(false)
 
+const offsetId = useId()
+const lengthId = useId()
+const audioDevId = useId()
+const micDevId = useId()
+const bitRateId = useId()
+const repeatsId = useId()
+const messageId = useId()
+const sstvModeId = useId()
+const freqId = useId()
+const gainId = useId()
+
 const centerHz = computed(() => Math.round(freqMhz.value * 1e6))
-const freqOk = computed(() => centerHz.value >= 1e6 && centerHz.value <= 6000e6)
+
+/** Tuning and gain limits come off the radio's descriptor, not this device. */
+const paramSpec = (key: string) => node.value?.descriptor.params.find((p) => p.key === key)
+const freqMin = computed(() => paramSpec('centerHz')?.min ?? 1e6)
+const freqMax = computed(() => paramSpec('centerHz')?.max ?? 6000e6)
+const gainMax = computed(() => paramSpec('txvga')?.max ?? 47)
+const freqOk = computed(() => centerHz.value >= freqMin.value && centerHz.value <= freqMax.value)
+const rangeText = computed(
+  () => `that frequency is outside the ${formatHz(freqMin.value)} to ${formatHz(freqMax.value)} the radio tunes.`,
+)
+
+watch(
+  gainMax,
+  (max) => {
+    if (gainDb.value > max) gainDb.value = max
+  },
+  { immediate: true },
+)
 
 let cancelled = false
 let releaseMic: (() => void) | null = null
@@ -269,6 +297,11 @@ const dataFormat = ref<'text' | 'hex'>('text')
 const dataKeying = ref<'ook' | 'afsk'>('ook')
 const bitRate = ref(2000)
 const repeats = ref(1)
+const REPEAT_MAX = 20
+const repeatCount = computed(() => {
+  const n = Number.isFinite(repeats.value) ? Math.round(repeats.value) : 1
+  return Math.min(REPEAT_MAX, Math.max(1, n))
+})
 
 const dataBytes = computed<Uint8Array>(() =>
   dataFormat.value === 'hex'
@@ -291,7 +324,7 @@ const frameSeconds = computed(
 
 async function sendData(session: TransmitSession): Promise<void> {
   const bytes = dataBytes.value
-  const count = Math.max(1, Math.round(repeats.value))
+  const count = repeatCount.value
   for (let i = 0; i < count && !cancelled; i++) {
     await session.transmitFrame(bytes, { bitRate: bitRate.value, mode: dataKeying.value })
     progress.value = (i + 1) / count
@@ -413,7 +446,7 @@ const outgoing = computed(() => {
   }
   if (mode.value === 'data') {
     const unit = dataKeying.value === 'afsk' ? 'baud' : 'bits per second'
-    const times = repeats.value > 1 ? `, ${repeats.value} times` : ''
+    const times = repeatCount.value > 1 ? `, ${repeatCount.value} times` : ''
     return `${dataBytes.value.length} bytes as ${dataKeying.value} at ${bitRate.value} ${unit}${times}`
   }
   if (!imageData.value) return 'nothing yet, pick an image'
@@ -437,7 +470,7 @@ async function broadcast(): Promise<void> {
     return
   }
   if (!freqOk.value) {
-    error.value = 'that frequency is outside the 1 MHz to 6 GHz the radio tunes.'
+    error.value = rangeText.value
     return
   }
   const blocked = blocker.value
@@ -554,12 +587,12 @@ onBeforeUnmount(() => {
     <!-- tone -->
     <div v-if="mode === 'tone'" class="bn-knobs">
       <div class="bn-knob" style="min-width: 190px">
-        <span class="bn-klabel">offset <b>{{ toneOffsetKhz }} kHz</b></span>
-        <input v-model.number="toneOffsetKhz" type="range" min="-500" max="500" step="5" />
+        <label class="bn-klabel" :for="offsetId">offset <b>{{ toneOffsetKhz }} kHz</b></label>
+        <input :id="offsetId" v-model.number="toneOffsetKhz" type="range" min="-500" max="500" step="5" />
       </div>
       <div class="bn-knob" style="min-width: 190px">
-        <span class="bn-klabel">length <b>{{ toneSeconds }} s</b></span>
-        <input v-model.number="toneSeconds" type="range" min="1" max="30" step="1" />
+        <label class="bn-klabel" :for="lengthId">length <b>{{ toneSeconds }} s</b></label>
+        <input :id="lengthId" v-model.number="toneSeconds" type="range" min="1" max="30" step="1" />
       </div>
     </div>
 
@@ -581,7 +614,7 @@ onBeforeUnmount(() => {
       <div class="bn-knobs">
         <div class="bn-knob">
           <span class="bn-klabel">modulation</span>
-          <div class="bn-seg2">
+          <div class="bn-seg2" role="group" aria-label="modulation">
             <button
               type="button"
               :class="{ 'is-on': audioMode === 'fm' }"
@@ -599,8 +632,8 @@ onBeforeUnmount(() => {
           </div>
         </div>
         <div v-if="audioMode === 'fm'" class="bn-knob" style="min-width: 170px">
-          <span class="bn-klabel">deviation</span>
-          <select v-model.number="deviationHz">
+          <label class="bn-klabel" :for="audioDevId">deviation</label>
+          <select :id="audioDevId" v-model.number="deviationHz">
             <option v-for="d in DEVIATIONS" :key="d.hz" :value="d.hz">{{ d.label }}</option>
           </select>
         </div>
@@ -616,8 +649,8 @@ onBeforeUnmount(() => {
       </div>
       <div class="bn-knobs">
         <div class="bn-knob" style="min-width: 170px">
-          <span class="bn-klabel">deviation</span>
-          <select v-model.number="deviationHz">
+          <label class="bn-klabel" :for="micDevId">deviation</label>
+          <select :id="micDevId" v-model.number="deviationHz">
             <option v-for="d in DEVIATIONS" :key="d.hz" :value="d.hz">{{ d.label }}</option>
           </select>
         </div>
@@ -637,7 +670,7 @@ onBeforeUnmount(() => {
       <div class="bn-knobs">
         <div class="bn-knob">
           <span class="bn-klabel">payload</span>
-          <div class="bn-seg2">
+          <div class="bn-seg2" role="group" aria-label="payload">
             <button
               type="button"
               :class="{ 'is-on': dataFormat === 'text' }"
@@ -656,7 +689,7 @@ onBeforeUnmount(() => {
         </div>
         <div class="bn-knob">
           <span class="bn-klabel">keying</span>
-          <div class="bn-seg2">
+          <div class="bn-seg2" role="group" aria-label="keying">
             <button
               type="button"
               :class="{ 'is-on': dataKeying === 'ook' }"
@@ -674,23 +707,31 @@ onBeforeUnmount(() => {
           </div>
         </div>
         <div class="bn-knob" style="min-width: 150px">
-          <span class="bn-klabel">
+          <label class="bn-klabel" :for="bitRateId">
             {{ dataKeying === 'afsk' ? 'baud' : 'bits per second' }} <b>{{ bitRate }}</b>
-          </span>
-          <input v-model.number="bitRate" type="number" min="50" max="200000" step="50" />
+          </label>
+          <input :id="bitRateId" v-model.number="bitRate" type="number" min="50" max="200000" step="50" />
         </div>
         <div class="bn-knob" style="min-width: 110px">
-          <span class="bn-klabel">repeats <b>{{ repeats }}</b></span>
-          <input v-model.number="repeats" type="number" min="1" max="20" step="1" />
+          <label class="bn-klabel" :for="repeatsId">repeats <b>{{ repeatCount }}</b></label>
+          <input
+            :id="repeatsId"
+            v-model.number="repeats"
+            type="number"
+            min="1"
+            :max="REPEAT_MAX"
+            step="1"
+          />
         </div>
       </div>
 
       <div class="bn-knobs">
         <div class="bn-knob" style="min-width: 100%">
-          <span class="bn-klabel">
+          <label class="bn-klabel" :for="messageId">
             message <b>{{ dataBytes.length }} bytes, {{ frameSeconds.toFixed(2) }} s</b>
-          </span>
+          </label>
           <input
+            :id="messageId"
             v-model="dataText"
             type="text"
             :placeholder="dataFormat === 'hex' ? 'a1 b2 c3' : 'what goes out'"
@@ -698,7 +739,7 @@ onBeforeUnmount(() => {
         </div>
       </div>
 
-      <div class="bn-bits" aria-label="bits that go out">{{ bitsPreview || 'no bits' }}</div>
+      <div class="bn-bits" role="group" aria-label="bits that go out">{{ bitsPreview || 'no bits' }}</div>
     </template>
 
     <!-- image -->
@@ -717,8 +758,8 @@ onBeforeUnmount(() => {
 
       <div class="bn-knobs">
         <div class="bn-knob" style="min-width: 190px">
-          <span class="bn-klabel">sstv mode</span>
-          <select v-model="sstvMode">
+          <label class="bn-klabel" :for="sstvModeId">sstv mode</label>
+          <select :id="sstvModeId" v-model="sstvMode">
             <option v-for="m in SSTV_MODES" :key="m.id" :value="m.id">{{ m.label }}</option>
           </select>
         </div>
@@ -754,12 +795,19 @@ onBeforeUnmount(() => {
 
     <div class="bn-knobs">
       <div class="bn-knob" style="min-width: 160px">
-        <span class="bn-klabel">frequency <b>MHz</b></span>
-        <input v-model.number="freqMhz" type="number" min="1" max="6000" step="0.001" />
+        <label class="bn-klabel" :for="freqId">frequency <b>MHz</b></label>
+        <input
+          :id="freqId"
+          v-model.number="freqMhz"
+          type="number"
+          :min="freqMin / 1e6"
+          :max="freqMax / 1e6"
+          step="0.001"
+        />
       </div>
       <div class="bn-knob" style="min-width: 190px">
-        <span class="bn-klabel">tx gain <b>{{ gainDb }} dB</b></span>
-        <input v-model.number="gainDb" type="range" min="0" max="47" step="1" />
+        <label class="bn-klabel" :for="gainId">tx gain <b>{{ gainDb }} dB</b></label>
+        <input :id="gainId" v-model.number="gainDb" type="range" min="0" :max="gainMax" step="1" />
       </div>
       <div class="bn-knob">
         <span class="bn-klabel">front end amp</span>
@@ -768,6 +816,7 @@ onBeforeUnmount(() => {
           class="bn-toggle"
           :class="{ 'is-on': ampOn }"
           :aria-pressed="ampOn"
+          aria-label="front end amp"
           @click="ampOn = !ampOn"
         >
           <span class="bn-sw"><i></i></span>{{ ampOn ? 'on, plus 14 dB' : 'off' }}
@@ -777,7 +826,7 @@ onBeforeUnmount(() => {
 
     <div v-if="!freqOk" class="bn-banner is-err">
       <HbIcon name="warning" :size="16" />
-      <span>that frequency is outside the 1 MHz to 6 GHz the radio tunes.</span>
+      <span>{{ rangeText }}</span>
     </div>
 
     <div v-if="!hasPath" class="bn-banner is-warn">

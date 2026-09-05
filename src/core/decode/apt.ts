@@ -84,6 +84,7 @@ export class AptDecoder {
   private img: ImageData | null = null
   private rows = 0
   private syncScore = 0
+  private finished = false
 
   constructor(opts: AptOptions = {}) {
     this.maxLines = Math.max(16, opts.maxLines ?? 1200)
@@ -101,7 +102,11 @@ export class AptDecoder {
     return this.rows
   }
 
-  /** Correlation of the last accepted line against the sync train, 0 to 1. */
+  /**
+   * Correlation of the last accepted line against the sync train. The template
+   * is not normalised against itself, so an ideal sync train scores about
+   * 0.46, which is the top of this scale.
+   */
   get lock(): number {
     return this.locked ? this.syncScore : 0
   }
@@ -118,6 +123,7 @@ export class AptDecoder {
     this.img = null
     this.rows = 0
     this.syncScore = 0
+    this.finished = false
   }
 
   feed(audio: Float32Array, sampleRate: number): void {
@@ -127,6 +133,7 @@ export class AptDecoder {
       this.reset()
       this.resamp.setStep(sampleRate / APT_WORD_RATE)
     }
+    if (this.finished) return
 
     const envelope = this.env.process(audio, sampleRate)
     const words = this.resamp.process(envelope)
@@ -225,7 +232,7 @@ export class AptDecoder {
 
     if (this.rows >= this.maxLines) {
       this.locked = false
-      this.scan = this.lineAbs
+      this.finished = true
       this.onComplete?.(this.crop())
       return false
     }

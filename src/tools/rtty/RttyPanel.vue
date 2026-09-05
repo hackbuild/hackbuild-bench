@@ -179,5 +179,14 @@ function clear(): void {
         switch to reverse.
       </div>
     </div>
+
+    <div v-if="audio.isSim.value" class="bn-hint">
+      <HbIcon name="flask" :size="15" />
+      <div>
+        <b>demo</b>
+        this device is simulated, so the panel synthesises the mark and space tones and runs
+        them through the same decoder. it plays at eight times real time.
+      </div>
+    </div>
   </div>
 </template>

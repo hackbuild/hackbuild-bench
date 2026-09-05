@@ -5,22 +5,24 @@ import type { DeviceDriver, DeviceHandle, DeviceSession, DriverContext } from '.
 import { COMMON_BAUDS, SerialPortHandle, scorePrintable } from '../../transport/webserial'
 
 /**
- * ESP32 over Web Serial. A serial console with auto baud, and the modem line
- * dance that drops the chip into its bootloader so flash can be rewritten.
+ * ESP32 over Web Serial. A serial console with auto baud.
  *
  * Pins, i2c, and servos are not here. Whatever sketch the board is running
  * decides what a line of text means, so there is nothing honest to offer until
  * the board runs a protocol the bench knows. Flash conduyt and the board comes
  * back as a conduyt device with a real pin grid.
+ *
+ * Flashing is not claimed. Nothing in the bench writes firmware, so the
+ * capability is left off rather than offered as an arm the user cannot spend.
  */
 
 const descriptor: DeviceDescriptor = {
   kind: 'esp32',
   name: 'ESP32',
-  blurb: 'serial console and flash, pin control comes from flashing conduyt',
+  blurb: 'serial console with auto baud, pin control comes from flashing conduyt',
   icon: 'microchip',
   transports: ['webserial'],
-  capabilities: [CAPABILITIES.SERIAL_CONSOLE, CAPABILITIES.FLASH_PROGRAM],
+  capabilities: [CAPABILITIES.SERIAL_CONSOLE],
   params: [
     {
       key: 'baud',
@@ -40,8 +42,6 @@ const descriptor: DeviceDescriptor = {
 }
 
 const DEFAULT_BAUD = 115200
-
-const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms))
 
 function concatBytes(chunks: Uint8Array[]): Uint8Array {
   let total = 0
@@ -77,7 +77,7 @@ class Esp32Session implements DeviceSession {
   }
 
   getCapabilities(): Capability[] {
-    return [CAPABILITIES.SERIAL_CONSOLE, CAPABILITIES.FLASH_PROGRAM]
+    return [CAPABILITIES.SERIAL_CONSOLE]
   }
 
   getInfo(): Record<string, string> {
@@ -115,7 +115,7 @@ class Esp32Session implements DeviceSession {
     return !this.closed && this.port.isOpen
   }
 
-  // extra surface the terminal and flasher tools drive ---------------------
+  // extra surface the terminal tool drives -------------------------------
 
   /** Send a line to the board and echo it as a tx artifact. */
   async write(text: string): Promise<void> {
@@ -127,9 +127,11 @@ class Esp32Session implements DeviceSession {
   /**
    * Try every common baud, sample each for 600 ms, and keep the one whose
    * traffic looks most like printable line structured text. Returns the winner
-   * and leaves the port open at it.
+   * and leaves the port open at it. A board that prints nothing scores zero at
+   * every baud, which is no evidence for any of them, so the current baud is
+   * kept and null is returned.
    */
-  async autoBaud(): Promise<number> {
+  async autoBaud(): Promise<number | null> {
     const wasEmitting = this.emitting
     this.emitting = false
     this.loopAbort?.abort()
@@ -137,7 +139,7 @@ class Esp32Session implements DeviceSession {
     await this.port.disconnect()
 
     let best = this.baud
-    let bestScore = -1
+    let bestScore = 0
     for (const baud of COMMON_BAUDS) {
       this.emitLine(`probing ${baud} baud`, 'note')
       try {
@@ -156,36 +158,17 @@ class Esp32Session implements DeviceSession {
       }
     }
 
-    await this.port.connect({ baudRate: best })
-    this.baud = best
+    const found = bestScore > 0
+    const baud = found ? best : this.baud
+    await this.port.connect({ baudRate: baud })
+    this.baud = baud
     this.emitting = wasEmitting
     this.startLoop()
-    this.emitLine(`selected ${best} baud`, 'note')
-    return best
-  }
-
-  /**
-   * Drive the modem lines to put the chip in the serial bootloader. This is the
-   * classic auto reset sequence: RTS toggles EN, DTR toggles GPIO0. Entering
-   * the bootloader halts the running program to write flash, so it needs flash
-   * write armed.
-   */
-  async enterBootloader(): Promise<void> {
-    if (!this.ctx.isArmed(CAPABILITIES.FLASH_PROGRAM)) {
-      throw new Error('flash write is not armed. arm flash write to enter the bootloader.')
-    }
-    await this.port.setSignals({ dataTerminalReady: false, requestToSend: true })
-    await sleep(100)
-    await this.port.setSignals({ dataTerminalReady: true, requestToSend: false })
-    await sleep(50)
-    await this.port.setSignals({ dataTerminalReady: false })
-  }
-
-  /** Pulse EN to reboot the board into the running program. */
-  async reset(): Promise<void> {
-    await this.port.setSignals({ requestToSend: true })
-    await sleep(100)
-    await this.port.setSignals({ requestToSend: false })
+    this.emitLine(
+      found ? `selected ${baud} baud` : `no readable traffic at any baud, left at ${baud}`,
+      'note',
+    )
+    return found ? baud : null
   }
 
   // internals --------------------------------------------------------------

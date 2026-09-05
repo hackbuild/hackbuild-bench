@@ -45,7 +45,9 @@ export class Downconverter {
 
   process(iq: Float32Array): Float32Array {
     if (!this.shifting && this.factor === 1) return iq
-    const outLen = Math.floor(iq.length / 2 / this.factor) * 2
+    // the accumulator carries across calls, so a block can finish a group the
+    // previous one started.
+    const outLen = Math.floor((iq.length / 2 + this.count) / this.factor) * 2
     const out = new Float32Array(outLen)
     let o = 0
     let c = this.cos
@@ -75,10 +77,8 @@ export class Downconverter {
       this.accI += ri
       this.accQ += rq
       if (++this.count === this.factor) {
-        if (o + 1 < outLen) {
-          out[o++] = this.accI / this.factor
-          out[o++] = this.accQ / this.factor
-        }
+        out[o++] = this.accI / this.factor
+        out[o++] = this.accQ / this.factor
         this.accI = this.accQ = this.count = 0
       }
     }
@@ -161,7 +161,7 @@ export class SsbDemod {
   }
 }
 
-/** One pole low pass, used as the audio de-emphasis and anti-alias stage. */
+/** One pole low pass, used as the audio band limit and the fm de-emphasis. */
 export class LowPass {
   private y = 0
   private a: number
@@ -189,51 +189,67 @@ export class Resampler {
   private last = 0
 
   process(input: Float32Array, ratio: number): Float32Array {
-    const outLen = Math.floor(input.length / ratio)
+    if (input.length === 0) return new Float32Array(0)
+    // pos is where in this block the next output sample reads from, and it
+    // lands in (-1, ratio - 1] after a block, so it can be negative.
+    const last = input.length - 1
+    const outLen = this.pos > last ? 0 : Math.floor((last - this.pos) / ratio) + 1
     const out = new Float32Array(outLen)
     for (let o = 0; o < outLen; o++) {
       const src = this.pos + o * ratio
       const i = Math.floor(src)
       const frac = src - i
-      const a = i === 0 ? this.last : (input[i - 1] ?? 0)
-      const b = input[i] ?? a
+      const a = i < 0 ? this.last : input[i]
+      const b = i + 1 <= last ? input[i + 1] : a
       out[o] = a + (b - a) * frac
     }
-    this.pos = (this.pos + outLen * ratio) % 1
-    this.last = input[input.length - 1] ?? this.last
+    this.pos = this.pos + outLen * ratio - input.length
+    this.last = input[last]
     return out
   }
 }
+
+/** A block peaking below this carries no signal worth levelling. */
+const AGC_NOISE_FLOOR = 0.002
 
 /** Automatic gain so a quiet station and a strong one are both listenable. */
 export class Agc {
   private gain = 1
   private target: number
-  private attack: number
-  private release: number
+  private rate: number
+  private attackSeconds: number
+  private releaseSeconds: number
 
-  constructor(target = 0.25, attack = 0.02, release = 0.0008) {
+  /** `sampleRate` is the rate of the audio handed to process, not the IF rate. */
+  constructor(sampleRate = 48000, target = 0.25, attackSeconds = 0.01, releaseSeconds = 1.5) {
+    this.rate = sampleRate > 0 ? sampleRate : 48000
     this.target = target
-    this.attack = attack
-    this.release = release
+    this.attackSeconds = attackSeconds
+    this.releaseSeconds = releaseSeconds
   }
 
   process(x: Float32Array): Float32Array {
+    if (x.length === 0) return x
     let peak = 0
     for (let i = 0; i < x.length; i++) {
       const a = Math.abs(x[i])
       if (a > peak) peak = a
     }
-    if (peak > 1e-6) {
-      const wanted = this.target / peak
-      const rate = wanted < this.gain ? this.attack : this.release
-      this.gain += (wanted - this.gain) * rate
+    const wanted = this.target / Math.max(peak, 1e-6)
+    if (wanted < this.gain || peak > AGC_NOISE_FLOOR) {
+      // block length varies with the driver's transfer size.
+      const dt = x.length / this.rate
+      const tau = wanted < this.gain ? this.attackSeconds : this.releaseSeconds
+      this.gain += (wanted - this.gain) * (1 - Math.exp(-dt / tau))
     }
     this.gain = Math.min(this.gain, 80)
     for (let i = 0; i < x.length; i++) x[i] = Math.max(-1, Math.min(1, x[i] * this.gain))
     return x
   }
 }
+
+/** 75 us de-emphasis as a corner frequency. Region 1 broadcasts 50 us, 3183 Hz. */
+const DEEMPHASIS_HZ = 2122
 
 /** Nothing useful survives a slice narrower than this. */
 const MIN_BANDWIDTH = 500
@@ -263,8 +279,9 @@ export class ReceiveChain {
   private usb = new SsbDemod(true)
   private lsb = new SsbDemod(false)
   private lp: LowPass
+  private deemph: LowPass
   private resamp = new Resampler()
-  private agc = new Agc()
+  private agc: Agc
   private mode: DemodMode = 'fm'
   private outRate = 48000
   private ifRate = 200000
@@ -275,6 +292,8 @@ export class ReceiveChain {
   constructor(outRate = 48000) {
     this.outRate = outRate
     this.lp = new LowPass(8000, this.ifRate)
+    this.deemph = new LowPass(DEEMPHASIS_HZ, this.ifRate)
+    this.agc = new Agc(outRate)
   }
 
   configure(mode: DemodMode, inputRate: number, bandwidthHz?: number): void {
@@ -310,8 +329,11 @@ export class ReceiveChain {
   }
 
   /**
-   * The decimation is the channel filter: what survives it is a slice one
-   * bandwidth wide around the offset. Everything downstream runs at that rate.
+   * Decimation is the only channel filter here, and a boxcar rejects poorly:
+   * content just outside the slice folds back in a few dB down. ssb keeps twice
+   * its bandwidth, since it shifts the band by half its width before taking the
+   * real part and a slice one bandwidth wide would fold onto itself.
+   * Everything downstream runs at the decimated rate.
    */
   private apply(): void {
     if (!this.inputRate) return
@@ -319,7 +341,9 @@ export class ReceiveChain {
     const limit = this.maxOffsetHz()
     this.offset = clampRange(this.offset, -limit, limit)
 
-    const factor = Math.max(1, Math.round(this.inputRate / this.bandwidth))
+    const ssb = this.mode === 'usb' || this.mode === 'lsb'
+    const ifTarget = ssb ? this.bandwidth * 2 : this.bandwidth
+    const factor = Math.max(1, Math.round(this.inputRate / ifTarget))
     this.ifRate = this.inputRate / factor
     this.down.configure(factor, this.offset, this.inputRate)
     // deviation only sets the discriminator gain, and the agc follows it.
@@ -327,6 +351,7 @@ export class ReceiveChain {
     this.fm.configure(deviation, this.ifRate)
     const audioCut = Math.min(this.mode === 'fm' ? 15000 : 3400, this.ifRate * 0.45)
     this.lp.configure(audioCut, this.ifRate)
+    this.deemph.configure(DEEMPHASIS_HZ, this.ifRate)
   }
 
   /** Interleaved IQ in, mono audio at outRate out. */
@@ -343,15 +368,16 @@ export class ReceiveChain {
         audio = this.am.process(base)
         break
       case 'usb':
-        audio = this.usb.process(base, this.ifRate)
+        audio = this.usb.process(base, this.ifRate, this.bandwidth)
         break
       case 'lsb':
-        audio = this.lsb.process(base, this.ifRate)
+        audio = this.lsb.process(base, this.ifRate, this.bandwidth)
         break
       default:
         return new Float32Array(0)
     }
     audio = this.lp.process(audio)
+    if (this.mode === 'fm') audio = this.deemph.process(audio)
     audio = this.resamp.process(audio, this.ifRate / this.outRate)
     return this.agc.process(audio)
   }

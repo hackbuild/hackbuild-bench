@@ -2,13 +2,12 @@
 import { computed, ref, watch } from 'vue'
 import { HbButton, HbIcon } from '@virgilvox/hackbuild-ui'
 import type { IconName } from '@virgilvox/hackbuild-ui'
-import RouteControl from './RouteControl.vue'
 import ArmDialog from './ArmDialog.vue'
 import { useDevices } from '@/stores/devices'
 import { useBench } from '@/stores/bench'
 import { toolsForDevice, unmetToolsForDevice } from '@/tools/registry'
 import type { DeviceNode } from '@/core/types'
-import { impactOf } from '@/core/capabilities'
+import { CAPABILITY_LABELS, impactOf } from '@/core/capabilities'
 import { isSimKind } from '@/core/drivers/sim/simulate'
 import type { Capability } from '@/core/capabilities'
 
@@ -69,17 +68,20 @@ async function disconnect(): Promise<void> {
 
       <div class="bn-grow"></div>
 
-      <RouteControl :device-id="node.id" />
-
       <button
         v-for="cap in armable"
         :key="cap"
         type="button"
         class="bn-recbtn"
+        :aria-pressed="node.armed.includes(cap)"
         @click="armPending = cap"
       >
-        <span class="bn-d" v-if="!node.armed.includes(cap)"></span>
-        {{ node.armed.includes(cap) ? `${cap} armed` : `arm ${cap}` }}
+        <span class="bn-d" v-if="node.armed.includes(cap)"></span>
+        {{
+          node.armed.includes(cap)
+            ? `${CAPABILITY_LABELS[cap] ?? cap} armed`
+            : `arm ${CAPABILITY_LABELS[cap] ?? cap}`
+        }}
       </button>
 
       <HbButton size="sm" @click="disconnect">
@@ -94,28 +96,22 @@ async function disconnect(): Promise<void> {
         <span>{{ node.error }}</span>
       </div>
 
-      <div v-if="tools.length > 1" class="bn-subtabs" role="tablist">
+      <div
+        v-if="tools.length > 1"
+        class="bn-subtabs"
+        role="group"
+        aria-label="tools for this device"
+      >
         <button
           v-for="t in tools"
           :key="t.id"
           type="button"
-          role="tab"
           class="bn-subtab"
           :class="{ 'is-on': t.id === activeId, 'is-adv': t.advanced }"
-          :aria-selected="t.id === activeId"
+          :aria-pressed="t.id === activeId"
           @click="activeId = t.id"
         >
           <HbIcon :name="(t.icon as IconName)" :size="11" />{{ t.label }}
-        </button>
-        <button
-          v-for="u in unmet"
-          :key="u.tool.id"
-          type="button"
-          class="bn-subtab"
-          disabled
-          :title="`needs ${u.missing.join(', ')}, which this device does not provide`"
-        >
-          <HbIcon :name="(u.tool.icon as IconName)" :size="11" />{{ u.tool.label }}
         </button>
       </div>
 
@@ -124,6 +120,11 @@ async function disconnect(): Promise<void> {
       <p v-else class="bn-note">
         this device reported no capabilities the bench has a tool for. its raw info is
         under the device log.
+      </p>
+
+      <p v-for="u in unmet" :key="u.tool.id" class="bn-note">
+        no {{ u.tool.label }}: this device does not provide
+        {{ u.missing.map((c) => CAPABILITY_LABELS[c] ?? c).join(', ') }}.
       </p>
     </div>
 

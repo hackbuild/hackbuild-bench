@@ -5,12 +5,15 @@ import type { DemodMode } from '@/core/dsp/demod'
 import { AudioSink } from '@/core/audio/AudioSink'
 import type { Artifact, IqChunk } from '@/core/types'
 
+/** IQ chunks land far faster than a display can use, so the level is paced. */
+const LEVEL_PUBLISH_MS = 20
+/** A jump this size is a retune or a carrier, and goes out without waiting. */
+const LEVEL_STEP_DB = 3
+
 /**
  * The listening path for any device that produces IQ.
  *
- * The driver emits IQ, this turns it into audio, and the audio sink plays it
- * and offers a tap so the transcriber can read the same samples without a
- * second demodulation.
+ * The driver emits IQ, this turns it into audio, and the audio sink plays it.
  */
 export function useReceiver(deviceId: string) {
   const mode = ref<DemodMode>('fm')
@@ -25,12 +28,20 @@ export function useReceiver(deviceId: string) {
   const chain = new ReceiveChain(48000)
   const sink = shallowRef<AudioSink | null>(null)
   let configuredRate = 0
+  let smoothDb = -120
+  let publishedAt = 0
 
   const stop = bus.onDeviceArtifact(deviceId, (a: Artifact) => {
     if (a.kind !== 'iq') return
     const chunk = a as IqChunk
 
-    signalDb.value = signalDb.value * 0.8 + ReceiveChain.power(chunk.samples) * 0.2
+    smoothDb = smoothDb * 0.8 + ReceiveChain.power(chunk.samples) * 0.2
+    const at = performance.now()
+    const moved = Math.abs(smoothDb - signalDb.value) > LEVEL_STEP_DB
+    if (moved || at - publishedAt >= LEVEL_PUBLISH_MS) {
+      publishedAt = at
+      signalDb.value = smoothDb
+    }
 
     if (!listening.value || mode.value === 'raw') return
 
@@ -54,8 +65,7 @@ export function useReceiver(deviceId: string) {
 
   function setMode(next: DemodMode): void {
     mode.value = next
-    // each mode listens through a different width, so a mode change resets it
-    // unless the width was already narrowed by hand.
+    // each mode listens through a different width, so the width follows it.
     bandwidthHz.value = MODE_BANDWIDTH[next]
     applyMode(next)
   }
@@ -97,9 +107,8 @@ export function useReceiver(deviceId: string) {
   }
 
   async function halt(): Promise<void> {
-    // stop only what this panel started. leaving the tune tab used to stop
-    // whatever else was running, and the unawaited call landed after the next
-    // panel had already started, killing it.
+    // bus.stop takes the whole device down, so a panel that is not listening
+    // must not call it, another panel may be streaming.
     if (!listening.value) return
     listening.value = false
     try {

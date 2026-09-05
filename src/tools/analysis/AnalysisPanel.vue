@@ -92,7 +92,7 @@ function figureItOut(): void {
   if (!found) {
     report.value = {
       ok: false,
-      text: 'nothing read better than what you already have. turn intensive on, or add an operation by hand.',
+      text: 'nothing beat what you already have. the search already ran intensive to three layers. add an operation by hand, or trim the recipe and try again.',
     }
     return
   }
@@ -120,8 +120,19 @@ function label(opId: string): string {
 }
 
 function argText(s: RecipeStep): string {
-  const values = Object.values(s.args).filter((v) => v !== '' && v !== undefined)
-  return values.map((v) => String(v)).join(' ')
+  const op = OPERATIONS.find((o) => o.id === s.opId)
+  if (!op) return ''
+  const parts: string[] = []
+  for (const a of op.args) {
+    const v = s.args[a.key]
+    if (v === '' || v === undefined || v === null) continue
+    // a boolean at its default adds nothing the label does not already carry.
+    if (a.type === 'boolean' && v === a.default) continue
+    // an arg label may carry a hint after a comma, only the head names the arg.
+    const name = a.label.split(',')[0].trim()
+    parts.push(`${name} ${v}`)
+  }
+  return parts.join(', ')
 }
 
 function short(bytes: Uint8Array, n = 64): string {

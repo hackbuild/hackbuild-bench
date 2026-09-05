@@ -336,10 +336,19 @@ function search(input: Uint8Array, intensive: boolean, maxDepth: number): Search
         const q = quality(bytes)
         if (!DECODERS.has(cand.opId) && q - branch.quality <= 0.06) continue
 
+        let opId = cand.opId
+        let args = cand.args
+        if (opId === 'xor-brute') {
+          // pin the key the brute landed on so the step re-bakes to the same
+          // bytes on the full buffer and can be named.
+          opId = 'xor'
+          args = { key: (branch.bytes[0] ^ bytes[0]).toString(16).padStart(2, '0'), format: 'hex' }
+        }
+
         const node: Node = {
           parent: branch.index,
-          opId: cand.opId,
-          args: cand.args,
+          opId,
+          args,
           bytes,
           depth,
           quality: q,

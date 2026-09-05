@@ -60,6 +60,7 @@ export class Transcriber {
   private inputRate = 0
   private busy = false
   private stopped = false
+  private prevWords: string[] = []
 
   /** Set when the model or the library could not be reached. Never thrown. */
   lastError: string | null = null
@@ -214,6 +215,7 @@ export class Transcriber {
     this.stopped = true
     this.len = 0
     this.sinceLastPass = 0
+    this.prevWords = []
   }
 
   /** Accept audio again after stop(). */
@@ -232,13 +234,43 @@ export class Transcriber {
       const out = await this.asr(window, { chunk_length_s: 30, return_timestamps: false })
       const text = (out?.text ?? '').trim()
       if (text && !NOISE.test(text)) {
-        const line: TranscriptLine = { text, at: Date.now() }
-        for (const fn of this.listeners) fn(line)
+        const trimmed = this.trimOverlap(text)
+        if (trimmed) {
+          const line: TranscriptLine = { text: trimmed, at: Date.now() }
+          for (const fn of this.listeners) fn(line)
+        }
       }
     } catch (err) {
       this.lastError = `transcription pass failed: ${err instanceof Error ? err.message : String(err)}`
     } finally {
       this.busy = false
     }
+  }
+
+  /**
+   * Consecutive windows share audio, so the model returns the tail of one pass
+   * as the head of the next. Drop the leading run of the new text that repeats
+   * the end of the last, matched on normalised tokens so different punctuation
+   * and casing between passes still line up. The trim is driven only by matched
+   * text, so a dropped pass with no shared audio removes nothing.
+   */
+  private trimOverlap(text: string): string {
+    const raw = text.split(/\s+/).filter(Boolean)
+    const norm = raw.map((w) => w.toLowerCase().replace(/[^a-z0-9]/g, ''))
+    const prev = this.prevWords
+    let overlap = 0
+    const max = Math.min(prev.length, norm.length)
+    for (let k = max; k >= 1; k--) {
+      let same = 0
+      for (let i = 0; i < k; i++) {
+        if (norm[i] !== '' && prev[prev.length - k + i] === norm[i]) same++
+      }
+      if (same >= Math.ceil(k * 0.7)) {
+        overlap = k
+        break
+      }
+    }
+    this.prevWords = norm
+    return raw.slice(overlap).join(' ')
   }
 }

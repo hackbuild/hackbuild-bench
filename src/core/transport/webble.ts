@@ -103,7 +103,7 @@ export class BleLink {
   async read(service: string, uuid: string): Promise<Uint8Array> {
     const c = await this.char(service, uuid)
     const v = await c.readValue()
-    return new Uint8Array(v.buffer)
+    return new Uint8Array(v.buffer, v.byteOffset, v.byteLength)
   }
 
   async write(service: string, uuid: string, data: Uint8Array, withResponse = true): Promise<void> {
@@ -124,7 +124,7 @@ export class BleLink {
     const c = await this.char(service, uuid)
     c.addEventListener('characteristicvaluechanged', () => {
       const v = c.value
-      if (v) onValue(new Uint8Array(v.buffer))
+      if (v) onValue(new Uint8Array(v.buffer, v.byteOffset, v.byteLength))
     })
     await c.startNotifications()
     this.subscriptions.set(`${service}/${uuid}`, c)

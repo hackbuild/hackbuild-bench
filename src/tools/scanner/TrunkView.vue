@@ -159,8 +159,8 @@ onBeforeUnmount(() => {
     <div v-if="system && !system.sites.length" class="bn-banner is-warn">
       <HbIcon name="warning" />
       <span>
-        this system has no control channel frequency bundled yet. add one in the import
-        step, or pick a system that has sites listed.
+        this system has no control channel frequency bundled, and this build has no way
+        to add one. pick a system that has sites listed.
       </span>
     </div>
 
@@ -232,7 +232,7 @@ onBeforeUnmount(() => {
         :key="s"
         type="button"
         class="bn-tinyact"
-        :class="{ 'is-on': serviceFilter === s }"
+        :aria-pressed="serviceFilter === s"
         @click="serviceFilter = s"
       >
         {{ s }}
@@ -274,9 +274,8 @@ onBeforeUnmount(() => {
     </div>
 
     <p class="bn-note">
-      encrypted talkgroups show as active but produce no audio, which is honest about what
-      a scanner can and cannot hear. most arizona law tactical is encrypted; fire dispatch
-      and the interop channels are usually in the clear.
+      encrypted talkgroups show as active but produce no audio. most arizona law tactical
+      is encrypted; fire dispatch and the interop channels are usually in the clear.
     </p>
   </div>
 </template>

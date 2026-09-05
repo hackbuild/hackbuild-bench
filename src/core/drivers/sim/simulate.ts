@@ -12,7 +12,7 @@ import type {
   TransmitFrameOptions,
   TxParams,
 } from '../types'
-import { boardProfile } from '../conduyt/profiles'
+import { boardProfile, mcuProfile } from '../conduyt/profiles'
 
 /**
  * Turns any driver into a simulated one.
@@ -21,7 +21,7 @@ import { boardProfile } from '../conduyt/profiles'
  * capabilities promise: a device that says it can observe a spectrum gets
  * carriers and a waterfall, one that says it captures packets gets frames in
  * its own protocol, one with a serial console gets a boot log. A new driver
- * gets a working simulator with no extra code, which is the point.
+ * gets a working simulator with no extra code.
  */
 
 export const SIM_PREFIX = 'sim:'
@@ -67,12 +67,100 @@ function pick<T>(list: readonly T[], i: number): T {
   return list[i % list.length]
 }
 
+// ---------------------------------------------------------------------------
+// the synthetic band, so what a radio hears depends on where it is tuned
+// ---------------------------------------------------------------------------
+
+/**
+ * The highest IQ rate this can fill in real time from the main thread. A block
+ * is sized from the clock at this rate and stamped with it, so a chunk really
+ * does hold the seconds of signal its sample rate claims, whatever rate the
+ * device knob asks for.
+ */
+const SIM_IQ_RATE = 240000
+const SIM_EMIT_MS = 20
+/** How often a display gets a frame, slower than blocks arrive. */
+const SIM_FFT_MS = 40
+/** A throttled timer can wake late, and one block will not make up more. */
+const SIM_MAX_BLOCK_MS = 250
+/** Puts an empty window near -90 dB, far enough under a carrier to scan by. */
+const SIM_NOISE_AMP = 8e-5
+const SIM_FLOOR_DB = -95
+/** Peak deviation, narrow enough to sit inside an nfm channel. */
+const SIM_DEVIATION_HZ = 5000
+/** Stations sit on this grid, so a channel reads the same on every visit. */
+const SIM_STATION_HZ = 200000
+/** Occupancy is clustered into blocks this wide, the way a real band is. */
+const SIM_BLOCK_HZ = 2e6
+/** Frequencies that always hold a station, so a device opens on a live one. */
+const SIM_ALWAYS_ON = [100.3e6, 433.92e6]
+
+const SIN_SIZE = 4096
+const SIN_TABLE = new Float32Array(SIN_SIZE)
+for (let i = 0; i < SIN_SIZE; i++) SIN_TABLE[i] = Math.sin((2 * Math.PI * i) / SIN_SIZE)
+
+/** Phase in turns, kept in 0..1 by the caller so the index cannot overflow. */
+function sinTurns(turns: number): number {
+  return SIN_TABLE[(turns * SIN_SIZE) & (SIN_SIZE - 1)]
+}
+
+function hash01(a: number, b: number): number {
+  let h = (Math.imul(a, 0x27d4eb2d) ^ Math.imul(b, 0x165667b1)) >>> 0
+  h = Math.imul(h ^ (h >>> 15), 0x2c1b3c6d) >>> 0
+  h = Math.imul(h ^ (h >>> 13), 0x297a2d39) >>> 0
+  return ((h ^ (h >>> 16)) >>> 0) / 4294967296
+}
+
+interface SimStation {
+  hz: number
+  amp: number
+  toneHz: number
+}
+
+/**
+ * What sits on one grid slot at one moment. Occupancy comes from the frequency
+ * alone, so a channel reads the same level every time the radio comes back to
+ * it, and the keying gate is coarse in time so a call opens, runs for a few
+ * seconds and ends rather than holding a scanner forever.
+ */
+function stationAt(hz: number, atMs: number): SimStation | null {
+  const slot = Math.round(hz / SIM_STATION_HZ)
+  const center = slot * SIM_STATION_HZ
+  const forced = SIM_ALWAYS_ON.find((f) => Math.round(f / SIM_STATION_HZ) === slot)
+  if (forced === undefined) {
+    if (hash01(Math.floor(center / SIM_BLOCK_HZ), 7) < 0.55) return null
+    if (hash01(slot, 11) < 0.62) return null
+    if (hash01(slot, Math.floor(atMs / 3000) + 3) < 0.35) return null
+  }
+  return {
+    hz: forced ?? center,
+    amp: 0.18 + 0.4 * hash01(slot, 5),
+    toneHz: 300 + Math.round(900 * hash01(slot, 9)),
+  }
+}
+
+/** The stations inside a window, low to high. */
+function stationsIn(lowHz: number, highHz: number, atMs: number): SimStation[] {
+  const first = Math.ceil(lowHz / SIM_STATION_HZ)
+  const last = Math.floor(highHz / SIM_STATION_HZ)
+  const out: SimStation[] = []
+  for (let slot = first; slot <= last; slot++) {
+    const station = stationAt(slot * SIM_STATION_HZ, atMs)
+    if (station) out.push(station)
+  }
+  return out
+}
+
+/** The board the simulator claims to be. Every reading has to scale to it. */
+const SIM_BOARD_ID = 'esp32dev'
+const SIM_ADC_MAX = (1 << (mcuProfile(boardProfile(SIM_BOARD_ID)?.mcu ?? '')?.adcBits ?? 10)) - 1
+
 /**
  * A HELLO in the shape a real conduyt board sends, built off the esp32 devkit
  * profile so the pin capability bitmasks match a board that exists.
  */
 function simHello(): HelloResp {
-  const board = boardProfile('esp32dev')
+  const board = boardProfile(SIM_BOARD_ID)
   const pinCount = board?.pinCount ?? 20
   const analog = new Set(board?.analogPins ?? [])
   const pwm = new Set(board?.pwmPins ?? [])
@@ -138,7 +226,11 @@ class SimulatedSession implements DeviceSession {
   private analyzer = new SpectrumAnalyzer(2048)
   private params: Record<string, number> = {}
   private timers: Array<ReturnType<typeof setInterval>> = []
-  private phase = 0
+  private mode = ''
+  /** Carrier and tone phase per station, so a block joins the last one. */
+  private phases = new Map<number, { carrier: number; tone: number }>()
+  private lastBlockAt = 0
+  private lastFftAt = 0
   private tick = 0
   private lineIndex = 0
   private pins = new Map<number, string>()
@@ -167,9 +259,12 @@ class SimulatedSession implements DeviceSession {
       note: 'synthetic data, nothing is on the air or on a wire',
       serial: `sim-${this.descriptor.kind}`,
     }
+    if (this.has(CAPABILITIES.CAPTURE_IQ)) {
+      info.synthesis = this.synthesisNote()
+    }
     if (this.has(CAPABILITIES.GPIO_DRIVE)) {
       const hello = this.getHello()
-      info['board id'] = 'esp32dev'
+      info['board id'] = SIM_BOARD_ID
       info.firmware = hello ? `${hello.firmwareName} ${hello.firmwareVersion.join('.')}` : 'none'
       info.pins = String(hello?.pins.length ?? 0)
     }
@@ -178,14 +273,34 @@ class SimulatedSession implements DeviceSession {
 
   async configure(params: Record<string, number>): Promise<void> {
     this.params = { ...this.params, ...params }
+    if (this.has(CAPABILITIES.CAPTURE_IQ)) this.ctx.setInfo({ synthesis: this.synthesisNote() })
+  }
+
+  /**
+   * The rate the stream really carries. A spectrum span or a receiver window
+   * reads off the chunk, so it will not match a sample rate knob set higher.
+   */
+  private synthesisNote(): string {
+    const asked = this.params.sampleRate ?? SIM_IQ_RATE
+    const at = `iq at ${SIM_IQ_RATE / 1000} ksps`
+    if (asked <= SIM_IQ_RATE) return at
+    return `${at}, the ${Math.round(asked / 1000)} ksps knob is not filled`
   }
 
   async start(mode: string): Promise<void> {
-    if (this.timers.length) return
+    for (const t of this.timers) clearInterval(t)
+    this.timers = []
+    this.mode = mode
+    this.lineIndex = 0
+    this.lastBlockAt = 0
     this.ctx.log(`simulated ${mode} started`)
 
     if (this.has(CAPABILITIES.CAPTURE_IQ) || this.has(CAPABILITIES.OBSERVE_SPECTRUM)) {
-      this.timers.push(setInterval(() => this.emitRadio(), 60))
+      this.timers.push(
+        this.bandRange()
+          ? setInterval(() => this.emitBand(), SIM_FFT_MS)
+          : setInterval(() => this.emitRadio(), SIM_EMIT_MS),
+      )
     }
     if (this.has(CAPABILITIES.CAPTURE_PACKET) || this.has(CAPABILITIES.MESH_RX)) {
       this.timers.push(setInterval(() => this.emitPacket(), 900))
@@ -198,52 +313,131 @@ class SimulatedSession implements DeviceSession {
     }
   }
 
+  /**
+   * One block of IQ, sized from the clock so the stream runs at the rate the
+   * chunk reports. The stations in the window are frequency modulated, which
+   * is what a demodulator downstream needs to produce a tone.
+   */
   private emitRadio(): void {
     if (this.ctx.signal.aborted) return
-    const rate = this.params.sampleRate ?? 2400000
+    const rate = Math.min(this.params.sampleRate ?? SIM_IQ_RATE, SIM_IQ_RATE)
     const centerHz = this.params.centerHz ?? this.tuningDefault()
-    const n = 4096
+    const now = performance.now()
+    const elapsed = this.lastBlockAt
+      ? Math.min(now - this.lastBlockAt, SIM_MAX_BLOCK_MS)
+      : SIM_EMIT_MS
+    this.lastBlockAt = now
+    const n = Math.max(1, Math.round((rate * elapsed) / 1000))
     const iq = new Float32Array(n * 2)
-    const step = (2 * Math.PI) / rate
+    const half = rate / 2
 
-    // three carriers that drift a little, so the waterfall has structure.
-    const carriers = [
-      { off: -0.28 * rate * 0.5, amp: 0.32, tone: 600 },
-      { off: 0.07 * rate * 0.5, amp: 0.55, tone: 440 },
-      { off: 0.51 * rate * 0.5, amp: 0.2, tone: 880 },
-    ]
-
-    for (let i = 0; i < n; i++) {
-      let re = 0
-      let im = 0
-      const t = this.phase + i
-      for (const c of carriers) {
-        const mod = 0.5 + 0.5 * Math.sin(step * c.tone * t * 40)
-        const angle = step * c.off * t
-        re += Math.cos(angle) * c.amp * mod
-        im += Math.sin(angle) * c.amp * mod
+    for (const station of stationsIn(centerHz - half, centerHz + half, Date.now())) {
+      const offset = station.hz - centerHz
+      if (Math.abs(offset) >= half) continue
+      const state = this.phaseOf(station.hz)
+      const carrierStep = offset / rate
+      const toneStep = station.toneHz / rate
+      const devStep = SIM_DEVIATION_HZ / rate
+      let carrier = state.carrier
+      let tone = state.tone
+      for (let i = 0; i < n; i++) {
+        tone += toneStep
+        if (tone >= 1) tone -= 1
+        carrier += carrierStep + devStep * sinTurns(tone)
+        carrier -= Math.floor(carrier)
+        iq[i * 2] += station.amp * sinTurns(carrier + 0.25)
+        iq[i * 2 + 1] += station.amp * sinTurns(carrier)
       }
-      re += (Math.random() - 0.5) * 0.05
-      im += (Math.random() - 0.5) * 0.05
-      iq[i * 2] = re
-      iq[i * 2 + 1] = im
+      state.carrier = carrier
+      state.tone = tone
     }
-    this.phase += n
+    for (let i = 0; i < n * 2; i++) iq[i] += (Math.random() - 0.5) * SIM_NOISE_AMP
 
     if (this.has(CAPABILITIES.CAPTURE_IQ)) {
       this.ctx.emit({ kind: 'iq', samples: iq, centerHz, sampleRate: rate, dropped: 0 })
     }
+    if (now - this.lastFftAt >= SIM_FFT_MS) {
+      this.lastFftAt = now
+      this.ctx.emit({
+        kind: 'fft',
+        bins: this.analyzer.process(iq).slice(),
+        centerHz,
+        sampleRate: rate,
+      })
+    }
+  }
+
+  /**
+   * A picture of a whole band rather than a window: what a sweep produces, and
+   * the only spectrum a device with no IQ path has. The frame carries the
+   * range it covers, so the readouts under the display match the band.
+   */
+  private emitBand(): void {
+    if (this.ctx.signal.aborted) return
+    const band = this.bandRange()
+    if (!band) return
+    const spanHz = band.highHz - band.lowHz
+    const count = Math.max(64, Math.min(2048, Math.round(spanHz / 1e6)))
+    const bins = new Float32Array(count).fill(SIM_FLOOR_DB)
+
+    for (const station of stationsIn(band.lowHz, band.highHz, Date.now())) {
+      const bin = Math.floor(((station.hz - band.lowHz) / spanHz) * count)
+      if (bin < 0 || bin >= count) continue
+      const db = 20 * Math.log10(station.amp)
+      bins[bin] = Math.max(bins[bin], db)
+      if (bin > 0) bins[bin - 1] = Math.max(bins[bin - 1], db - 12)
+      if (bin < count - 1) bins[bin + 1] = Math.max(bins[bin + 1], db - 12)
+    }
+    for (let i = 0; i < count; i++) bins[i] += (Math.random() - 0.5) * 4
+
     this.ctx.emit({
       kind: 'fft',
-      bins: this.analyzer.process(iq).slice(),
-      centerHz,
-      sampleRate: rate,
+      bins,
+      centerHz: band.lowHz + spanHz / 2,
+      sampleRate: spanHz,
     })
   }
 
+  private phaseOf(hz: number): { carrier: number; tone: number } {
+    // tuning around leaves phases behind for stations nothing is listening to.
+    if (this.phases.size > 64) this.phases.clear()
+    let state = this.phases.get(hz)
+    if (!state) {
+      state = { carrier: 0, tone: 0 }
+      this.phases.set(hz, state)
+    }
+    return state
+  }
+
+  /** The tuning knob, in whatever unit the descriptor states it in. */
+  private tuningParam(): ParamSpec | undefined {
+    return this.descriptor.params.find((p) => /hz$/i.test(p.key) || /^m?hz$/i.test(p.unit ?? ''))
+  }
+
   private tuningDefault(): number {
-    const spec: ParamSpec | undefined = this.descriptor.params.find((p) => /hz$/i.test(p.key))
-    return spec?.default ?? 100.3e6
+    const spec = this.tuningParam()
+    if (!spec) return 100.3e6
+    return spec.default * (/^mhz$/i.test(spec.unit ?? '') ? 1e6 : 1)
+  }
+
+  /**
+   * The range a spectrum frame covers when it is a band rather than a window:
+   * the requested sweep, or, for a device with no IQ path, the whole range its
+   * tuning knob can reach. The sweep knobs move independently, so the high end
+   * holds at least 1 MHz above the low one, matching the hardware driver.
+   */
+  private bandRange(): { lowHz: number; highHz: number } | null {
+    if (!this.has(CAPABILITIES.OBSERVE_SPECTRUM)) return null
+    const low = this.params.sweepLowHz
+    const high = this.params.sweepHighHz
+    if (this.mode === 'sweep' && low !== undefined && high !== undefined) {
+      return { lowHz: low, highHz: Math.max(low + 1e6, high) }
+    }
+    if (this.has(CAPABILITIES.CAPTURE_IQ)) return null
+    const spec = this.tuningParam()
+    if (!spec) return null
+    const scale = /^mhz$/i.test(spec.unit ?? '') ? 1e6 : 1
+    return { lowHz: spec.min * scale, highHz: spec.max * scale }
   }
 
   private emitPacket(): void {
@@ -276,7 +470,7 @@ class SimulatedSession implements DeviceSession {
 
     if (kind === 'ubertooth') {
       const name = pick(BLE_NAMES, i)
-      const mac = randomMac(i)
+      const mac = randomMac(i % BLE_NAMES.length)
       this.ctx.emit({
         kind: 'packet',
         bytes: new Uint8Array([0xd6, 0xbe, 0x89, 0x8e, 0x40, 0x24, i & 0xff]),
@@ -317,7 +511,7 @@ class SimulatedSession implements DeviceSession {
       rssi: -40 - (i % 50),
       fields: {
         ssid: pick(WIFI_NAMES, i),
-        bssid: randomMac(i + 100),
+        bssid: randomMac((i % WIFI_NAMES.length) + 100),
         channel: [1, 6, 11, 36, 149][i % 5],
         encryption: i % 4 === 0 ? 'open' : 'WPA2',
       },
@@ -373,15 +567,25 @@ class SimulatedSession implements DeviceSession {
   }
 
   async readPin(pin: number): Promise<number> {
-    const value = this.pinValues.get(pin) ?? (pin * 7 + this.tick) % 2
+    const value = this.pinValues.get(pin) ?? this.digitalSample(pin)
     this.ctx.emit({ kind: 'reading', name: `pin ${pin}`, value })
     return value
   }
 
+  /** An unwritten pin squares off on its own, offset per pin. */
+  private digitalSample(pin: number): number {
+    return Math.floor(Date.now() / 1500 + pin * 0.5) % 2
+  }
+
   async analogRead(pin: number): Promise<number> {
-    const value = Math.round(512 + 480 * Math.sin(Date.now() / 900 + pin))
+    const value = this.analogSample(pin)
     this.ctx.emit({ kind: 'reading', name: `pin ${pin}`, value, unit: 'counts' })
     return value
+  }
+
+  /** Full scale is the board's own adc, so the panel's gauge reads right. */
+  private analogSample(pin: number): number {
+    return Math.round(SIM_ADC_MAX / 2 + SIM_ADC_MAX * 0.47 * Math.sin(Date.now() / 900 + pin))
   }
 
   async scanI2c(): Promise<number[]> {
@@ -427,11 +631,7 @@ class SimulatedSession implements DeviceSession {
 
   subscribePin(pin: number, analog = false): () => void {
     return this.simSubscribe(`pin:${pin}`, () => {
-      const value = analog
-        ? Math.round(512 + 480 * Math.sin(Date.now() / 900 + pin))
-        : (Date.now() / 1000 + pin) % 2 < 1
-          ? 1
-          : 0
+      const value = analog ? this.analogSample(pin) : this.digitalSample(pin)
       this.ctx.emit(
         analog
           ? { kind: 'reading', name: `pin ${pin}`, value, unit: 'counts' }

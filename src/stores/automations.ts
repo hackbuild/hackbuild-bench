@@ -46,6 +46,10 @@ export const useAutomations = defineStore('automations', () => {
   const log = ref<RuleLogEntry[]>([])
   let counter = 0
 
+  // a failing action must not retry on every artifact, so the gap is measured
+  // from the attempt.
+  const lastAttemptAt = new Map<string, number>()
+
   const { toast } = useToast()
 
   const env = {
@@ -70,26 +74,36 @@ export const useAutomations = defineStore('automations', () => {
       if (!triggerMatches(rule.trigger, a)) continue
 
       const gap = rule.condition.minGapMs
-      if (gap && Date.now() - rule.lastFiredAt < gap) continue
+      if (gap && Date.now() - (lastAttemptAt.get(rule.id) ?? 0) < gap) continue
 
-      rule.lastFiredAt = Date.now()
-      rule.fired++
+      lastAttemptAt.set(rule.id, Date.now())
 
-      const perform = buildPerform(rule.action, env)
+      // update() replaces the rule object, so only the id survives an edit
+      // made while the action is in flight.
+      const id = rule.id
+      const action = rule.action
+      const perform = buildPerform(action, env)
       void perform(a).then(
         () => {
-          rule.lastError = undefined
-          pushLog(rule.id, describeFire(rule, a), 'fire')
+          const live = rules.value.find((r) => r.id === id)
+          if (!live) return
+          live.lastError = undefined
+          live.lastFiredAt = Date.now()
+          live.fired++
+          pushLog(id, describeFire(action, a), 'fire')
         },
         (err: unknown) => {
-          rule.lastError = err instanceof Error ? err.message : String(err)
-          pushLog(rule.id, rule.lastError, 'error')
+          const message = err instanceof Error ? err.message : String(err)
+          const live = rules.value.find((r) => r.id === id)
+          if (!live) return
+          live.lastError = message
+          pushLog(id, message, 'error')
         },
       )
     }
   })
 
-  function describeFire(rule: Rule, a: Artifact): string {
+  function describeFire(action: ActionConfig, a: Artifact): string {
     const what =
       a.kind === 'packet'
         ? a.summary ?? a.proto
@@ -97,8 +111,10 @@ export const useAutomations = defineStore('automations', () => {
           ? a.text
           : a.kind === 'transcript'
             ? a.word
-            : a.kind
-    return `${rule.action.type} on "${what}"`
+            : a.kind === 'reading'
+              ? `${a.name} ${a.value}`
+              : a.kind
+    return `${action.type} on "${what}"`
   }
 
   function addBlank(): void {
@@ -160,20 +176,27 @@ export const useAutomations = defineStore('automations', () => {
 
   function remove(id: string): void {
     rules.value = rules.value.filter((r) => r.id !== id)
+    lastAttemptAt.delete(id)
   }
 
   /** Fire a rule by hand, to check the action does what you expect. */
   async function test(id: string): Promise<void> {
     const rule = rules.value.find((r) => r.id === id)
     if (!rule) return
-    const perform = buildPerform(rule.action, env)
+    const action = rule.action
+    const perform = buildPerform(action, env)
     try {
       await perform({ kind: 'line', text: 'manual test', stream: 'note', source: '', t: 0, wall: Date.now(), seq: 0 })
-      rule.lastError = undefined
-      pushLog(rule.id, `tested ${rule.action.type}`, 'fire')
+      const live = rules.value.find((r) => r.id === id)
+      if (!live) return
+      live.lastError = undefined
+      pushLog(id, `tested ${action.type}`, 'fire')
     } catch (err) {
-      rule.lastError = err instanceof Error ? err.message : String(err)
-      pushLog(rule.id, rule.lastError, 'error')
+      const message = err instanceof Error ? err.message : String(err)
+      const live = rules.value.find((r) => r.id === id)
+      if (!live) return
+      live.lastError = message
+      pushLog(id, message, 'error')
     }
   }
 

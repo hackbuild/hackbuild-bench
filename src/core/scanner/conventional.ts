@@ -171,21 +171,21 @@ export const HAM: ChannelGroup = {
 }
 
 /**
- * Railroad channels moved to a 7.5 kHz grid in the narrowbanding change, so
- * these are the AAR channel centres rather than the older 15 kHz spacing.
+ * AAR channels on the 15 kHz grid, without the narrowband 7.5 kHz interstitials.
+ * Channel 7 sits at 160.215 MHz and each step is 15 kHz, so the group spans the
+ * road channels across the band rather than a slice at the low end.
  */
 export const RAILROAD: ChannelGroup = {
   id: 'railroad',
   name: 'railroad',
   blurb: 'road, yard, and dispatch traffic on the aar channel grid',
   service: 'railroad',
-  channels: Array.from({ length: 20 }, (_, i) =>
+  channels: Array.from({ length: 90 }, (_, i) =>
     ch(
-      `aar${String(i + 20).padStart(3, '0')}`,
-      `AAR ${i + 20}`,
+      `aar${String(i + 7).padStart(3, '0')}`,
+      `AAR ${i + 7}`,
       160.215e6 + i * 15e3,
       'railroad',
-      i === 0 ? 'the low end of the band, scan the whole group to find the local road channel' : undefined,
     ),
   ),
 }

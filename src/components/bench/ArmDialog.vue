@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, ref } from 'vue'
+import { computed, nextTick, onMounted, ref } from 'vue'
 import { HbButton, HbIcon, HbModal } from '@virgilvox/hackbuild-ui'
 import { ARM_NOTES, CAPABILITY_LABELS } from '@/core/capabilities'
 import type { Capability } from '@/core/capabilities'
@@ -14,7 +14,13 @@ const props = defineProps<Props>()
 const emit = defineEmits<{ close: [] }>()
 
 const devices = useDevices()
-const open = ref(true)
+// HbModal moves focus, traps tab and locks the page behind only when the model
+// transitions, and every call site creates this with v-if.
+const open = ref(false)
+
+onMounted(() => {
+  open.value = true
+})
 
 const node = computed(() => devices.nodes.find((n) => n.id === props.deviceId) ?? null)
 const armed = computed(() => node.value?.armed.includes(props.capability) ?? false)
@@ -24,11 +30,14 @@ const note = computed(() => ARM_NOTES[props.capability] ?? '')
 function confirm(): void {
   if (armed.value) devices.disarm(props.deviceId, props.capability)
   else devices.arm(props.deviceId, props.capability)
-  close()
+  void close()
 }
 
-function close(): void {
+async function close(): Promise<void> {
   open.value = false
+  // the parent drops this with v-if on the close event, which would cancel the
+  // library's own watcher before it puts page scroll and focus back.
+  await nextTick()
   emit('close')
 }
 </script>

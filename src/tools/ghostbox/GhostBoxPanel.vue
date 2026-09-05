@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, ref, watch } from 'vue'
+import { computed, onBeforeUnmount, ref, useId, watch } from 'vue'
 import { HbButton, HbIcon } from '@virgilvox/hackbuild-ui'
 import InstWordCloud from '@/components/instruments/InstWordCloud.vue'
 import InstSweepBar from '@/components/instruments/InstSweepBar.vue'
@@ -37,12 +37,20 @@ const bandId = ref('fm')
 const direction = ref<SweepDirection>('up')
 const dwellMs = ref(120)
 const throughEars = ref(true)
-const running = ref(false)
+const boxOpen = ref(false)
+const sweeping = ref(false)
 const currentHz = ref(0)
+
+const bandSelId = useId()
+const dirSelId = useId()
+const dwellId = useId()
 
 const words = ref(new Map<string, WordEntry>())
 
 const band = computed(() => bandById(bandId.value) ?? SWEEP_BANDS[0])
+
+/** Open with the sweep held: rx and whisper still run, the tune stays put. */
+const parked = computed(() => boxOpen.value && !sweeping.value)
 
 const box = new SpiritBox({
   band: band.value,
@@ -103,13 +111,20 @@ async function open(): Promise<void> {
     dwellMs: dwellMs.value,
   })
   box.start()
-  running.value = true
+  boxOpen.value = true
+  sweeping.value = true
 }
 
 async function close(): Promise<void> {
   box.stop()
-  running.value = false
+  sweeping.value = false
+  boxOpen.value = false
   await rx.stop()
+}
+
+function resume(): void {
+  box.start()
+  sweeping.value = true
 }
 
 function clear(): void {
@@ -133,6 +148,13 @@ function exportCsv(): void {
 }
 
 function retune(hz: number): void {
+  // the sweep would drag the receiver off within one dwell, so stop it and hold
+  // the tune where the word was caught.
+  if (sweeping.value) {
+    box.stop()
+    sweeping.value = false
+  }
+  currentHz.value = hz
   void devices.configure(props.deviceId, { centerHz: hz })
 }
 
@@ -146,14 +168,14 @@ onBeforeUnmount(() => {
   <div>
     <div class="bn-knobs" style="margin-top: 0">
       <div class="bn-knob">
-        <span class="bn-klabel">band</span>
-        <select v-model="bandId">
+        <label class="bn-klabel" :for="bandSelId">band</label>
+        <select :id="bandSelId" v-model="bandId">
           <option v-for="b in SWEEP_BANDS" :key="b.id" :value="b.id">{{ b.name }}</option>
         </select>
       </div>
       <div class="bn-knob">
-        <span class="bn-klabel">direction</span>
-        <select v-model="direction">
+        <label class="bn-klabel" :for="dirSelId">direction</label>
+        <select :id="dirSelId" v-model="direction">
           <option value="up">up the band</option>
           <option value="down">down the band</option>
           <option value="bounce">bounce</option>
@@ -161,8 +183,8 @@ onBeforeUnmount(() => {
         </select>
       </div>
       <div class="bn-knob" style="min-width: 170px">
-        <span class="bn-klabel">sweep <b>{{ dwellMs }} ms</b></span>
-        <input v-model.number="dwellMs" type="range" min="40" max="400" step="10" />
+        <label class="bn-klabel" :for="dwellId">sweep <b>{{ dwellMs }} ms</b></label>
+        <input :id="dwellId" v-model.number="dwellMs" type="range" min="40" max="400" step="10" />
       </div>
       <div class="bn-knob">
         <span class="bn-klabel">audio</span>
@@ -171,6 +193,7 @@ onBeforeUnmount(() => {
           class="bn-toggle"
           :class="{ 'is-on': throughEars }"
           :aria-pressed="throughEars"
+          aria-label="audio through ears"
           @click="throughEars = !throughEars"
         >
           <span class="bn-sw"><i></i></span>through ears
@@ -178,7 +201,7 @@ onBeforeUnmount(() => {
       </div>
       <div class="bn-knob">
         <span class="bn-klabel">&nbsp;</span>
-        <HbButton v-if="!running" variant="danger" size="sm" @click="open">
+        <HbButton v-if="!boxOpen" variant="danger" size="sm" @click="open">
           <template #icon><HbIcon name="ghost" /></template>
           open the box
         </HbButton>
@@ -190,6 +213,15 @@ onBeforeUnmount(() => {
     </div>
 
     <InstSweepBar :percent="percent" :label="sweepLabel" />
+
+    <div v-if="parked" class="bn-banner">
+      <HbIcon name="ghost" />
+      <span>sweep stopped, receiver parked on {{ sweepLabel }}.</span>
+      <HbButton size="sm" @click="resume">
+        <template #icon><HbIcon name="ghost" /></template>
+        resume sweep
+      </HbButton>
+    </div>
 
     <div class="bn-subhead">
       what it heard

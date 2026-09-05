@@ -17,7 +17,7 @@ export interface ScanEntry {
   channel: ConventionalChannel
   /** Skipped by the user until they unlock it. */
   locked: boolean
-  /** Checked before the rest of the list on every pass. */
+  /** Sampled more often than the rest of the list while scanning. */
   priority: boolean
   /** Times this channel opened during the session. */
   hits: number
@@ -53,15 +53,15 @@ export interface ScannerConfig {
   dwellMs: number
   /** Milliseconds to keep listening after a carrier drops, so replies are not cut off. */
   hangMs: number
-  /** Check priority channels this often while receiving, 0 to never. */
-  priorityIntervalMs: number
+  /** One priority channel is sampled for every this many regular channels. */
+  priorityEvery: number
 }
 
 const DEFAULTS: ScannerConfig = {
   thresholdDb: -70,
   dwellMs: 90,
   hangMs: 1600,
-  priorityIntervalMs: 0,
+  priorityEvery: 4,
 }
 
 export class Scanner {
@@ -77,6 +77,14 @@ export class Scanner {
   private held = false
   private calls: ScanCall[] = []
   private counter = 0
+  private sincePriority = 0
+  private priorityCursor = 0
+  /**
+   * Where the ordinary round robin has reached. A priority visit moves `index`
+   * without touching this, otherwise the sweep resumes from the priority
+   * channel and never leaves the few slots after it.
+   */
+  private sweep = 0
 
   constructor(hooks: ScannerHooks, config: Partial<ScannerConfig> = {}) {
     this.hooks = hooks
@@ -100,6 +108,7 @@ export class Scanner {
         },
     )
     if (this.index >= this.entries.length) this.index = 0
+    if (this.sweep >= this.entries.length) this.sweep = 0
   }
 
   get list(): ScanEntry[] {
@@ -175,11 +184,20 @@ export class Scanner {
   private step(): void {
     const list = this.entries
     if (!list.length) return
+    const priorities = list.filter((e) => !e.locked && e.priority)
+    if (priorities.length && ++this.sincePriority >= this.config.priorityEvery) {
+      this.sincePriority = 0
+      this.priorityCursor = (this.priorityCursor + 1) % priorities.length
+      this.index = list.indexOf(priorities[this.priorityCursor])
+      this.visit()
+      return
+    }
     let guard = 0
     do {
-      this.index = (this.index + 1) % list.length
+      this.sweep = (this.sweep + 1) % list.length
       guard++
-    } while (list[this.index].locked && guard <= list.length)
+    } while (list[this.sweep].locked && guard <= list.length)
+    this.index = this.sweep
     this.visit()
   }
 

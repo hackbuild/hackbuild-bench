@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, ref } from 'vue'
+import { computed, onBeforeUnmount, ref, useId } from 'vue'
 import { HbButton, HbIcon } from '@virgilvox/hackbuild-ui'
 import InstPacketList from '@/components/instruments/InstPacketList.vue'
 import InstHexView from '@/components/instruments/InstHexView.vue'
@@ -21,6 +21,7 @@ const node = computed(() => devices.nodes.find((n) => n.id === props.deviceId) ?
 const streaming = computed(() => node.value?.status === 'streaming')
 
 const filter = ref('')
+const filterId = useId()
 const selected = ref<PacketRecord | null>(null)
 
 const shown = computed(() => {
@@ -34,7 +35,9 @@ const shown = computed(() => {
     : stream.packets.value
   return list.map((p) => ({
     id: `${p.source}-${p.seq}`,
-    a: String(p.fields?.address ?? p.fields?.mac ?? p.proto),
+    a: String(
+      p.fields?.advertiser ?? p.fields?.address ?? p.fields?.mac ?? p.fields?.lap ?? p.proto,
+    ),
     b: p.summary ?? p.proto,
     c: p.rssi !== undefined ? `${p.rssi}` : '',
     decode: p.fields ? summarise(p.fields) : undefined,
@@ -44,7 +47,7 @@ const shown = computed(() => {
 
 function summarise(fields: Record<string, unknown>): string {
   return Object.entries(fields)
-    .filter(([k]) => k !== 'address' && k !== 'mac')
+    .filter(([k]) => k !== 'address' && k !== 'mac' && k !== 'advertiser' && k !== 'lap')
     .map(([k, v]) => `${k} ${String(v)}`)
     .join('  ')
 }
@@ -75,8 +78,8 @@ onBeforeUnmount(() => {
   <div>
     <div class="bn-knobs" style="margin-top: 0">
       <div class="bn-knob" style="min-width: 200px">
-        <span class="bn-klabel">filter</span>
-        <input v-model="filter" type="text" placeholder="mac, name, or any field" />
+        <label class="bn-klabel" :for="filterId">filter</label>
+        <input :id="filterId" v-model="filter" type="text" placeholder="mac, name, or any field" />
       </div>
       <div class="bn-knob">
         <span class="bn-klabel">&nbsp;</span>

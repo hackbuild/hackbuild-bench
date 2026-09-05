@@ -11,8 +11,9 @@ import { useDevices } from '@/stores/devices'
 import { useAutomations } from '@/stores/automations'
 import { toHex } from '@/core/format'
 import type { Artifact, PacketRecord } from '@/core/types'
+import { CAPABILITY_LABELS } from '@/core/capabilities'
 import type { Capability } from '@/core/capabilities'
-import type { DeviceSession } from '@/core/drivers/types'
+import type { TransmitSession } from '@/core/drivers/types'
 
 interface Props {
   artifact: Artifact
@@ -39,13 +40,9 @@ const missing = computed(() => {
 })
 
 const arming = ref<{ deviceId: string; capability: Capability } | null>(null)
+const pending = ref<Offer | null>(null)
 const outcome = ref<string | null>(null)
 const preview = ref<{ deviceId: string; label: string; bytes: Uint8Array } | null>(null)
-
-type TransmitSession = DeviceSession & {
-  replayFrame?(bytes: Uint8Array): Promise<void>
-  transmit?(bytes: Uint8Array): Promise<void>
-}
 
 function bytesOf(): Uint8Array {
   if (props.artifact.kind === 'packet') return (props.artifact as PacketRecord).bytes
@@ -71,10 +68,11 @@ async function take(offer: Offer): Promise<void> {
 
   if (offer.arms && offer.target && !offer.armed) {
     arming.value = { deviceId: offer.target.id, capability: offer.arms }
+    pending.value = offer
     return
   }
 
-  if (offer.id.startsWith('replay:') || offer.id.startsWith('retransmit:')) {
+  if (offer.id.startsWith('replay:')) {
     // the frame is shown before anything goes out, so a replay is always a
     // deliberate send of something you have looked at.
     preview.value = {
@@ -103,19 +101,44 @@ async function take(offer: Offer): Promise<void> {
   }
 }
 
+/** The arm is a separate press. Nothing resumes on its own. */
+function armClosed(): void {
+  const offer = pending.value
+  arming.value = null
+  pending.value = null
+  if (!offer || !offer.arms || !offer.target) return
+  const cap = offer.arms
+  const node = devices.nodes.find((n) => n.id === offer.target?.id) ?? null
+  outcome.value = node?.armed.includes(cap)
+    ? `${CAPABILITY_LABELS[cap] ?? cap} armed. press ${offer.label} to go on.`
+    : 'not armed, nothing sent'
+}
+
+/** Names the device, so two radios arming the same capability stay apart. */
+function armLabel(o: Offer): string {
+  const cap = o.arms ? (CAPABILITY_LABELS[o.arms] ?? o.arms) : ''
+  return `arm ${cap} on ${o.target?.label ?? 'this device'}`
+}
+
 async function send(): Promise<void> {
   const frame = preview.value
   if (!frame) return
+  preview.value = null
+  // transmitFrame opens the path, drains it and closes it, so a one shot replay
+  // must not be wrapped in beginTransmit and endTransmit or the tail is cut.
   const session = bus.session<TransmitSession>(frame.deviceId)
+  if (!session?.transmitFrame) {
+    outcome.value = `${frame.label} has no transmit path`
+    return
+  }
+  // a frame can key the radio for seconds, and the preview card is gone by now,
+  // so the wait needs a line of its own.
+  outcome.value = `sending ${frame.bytes.length} bytes through ${frame.label}`
   try {
-    if (session?.replayFrame) await session.replayFrame(frame.bytes)
-    else if (session?.transmit) await session.transmit(frame.bytes)
-    else throw new Error(`${frame.label} has no replay path yet`)
+    await session.transmitFrame(frame.bytes)
     outcome.value = `sent ${frame.bytes.length} bytes through ${frame.label}`
   } catch (err) {
     outcome.value = err instanceof Error ? err.message : String(err)
-  } finally {
-    preview.value = null
   }
 }
 </script>
@@ -137,7 +160,7 @@ async function send(): Promise<void> {
         @click="take(o)"
       >
         <template #icon><HbIcon :name="(o.icon as IconName)" /></template>
-        {{ o.arms && !o.armed ? `arm and ${o.label}` : o.label }}
+        {{ o.arms && !o.armed ? armLabel(o) : o.label }}
       </HbButton>
     </div>
 
@@ -163,7 +186,7 @@ async function send(): Promise<void> {
       v-if="arming"
       :device-id="arming.deviceId"
       :capability="arming.capability"
-      @close="arming = null"
+      @close="armClosed"
     />
   </div>
 </template>

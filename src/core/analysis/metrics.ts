@@ -96,6 +96,9 @@ const COMMON_WORDS = [
   'device', 'status', 'reset', 'send', 'recv', 'data', 'time', 'name', 'test', 'mode',
 ]
 
+/** Whole-word matchers, so 'the' inside 'other' and 'not' inside 'another' do not count. */
+const WORD_RES = COMMON_WORDS.map((w) => new RegExp(`\\b${w}\\b`))
+
 const LETTER_NORM = (() => {
   let sq = 0
   for (const f of ENGLISH_FREQ) sq += (f / 100) * (f / 100)
@@ -114,6 +117,15 @@ export function letterFit(counts: ArrayLike<number>, letters: number): number {
   }
   const denom = Math.sqrt(na) * LETTER_NORM
   return denom > 0 ? clamp01(dot / denom) : 0
+}
+
+// the raw cosine floors near this value for any letter-shaped input because
+// both vectors are non-negative, so a uniform distribution already scores high.
+const UNIFORM_FIT = letterFit(new Array(26).fill(1), 26)
+
+/** letterFit rescaled so a uniform distribution reads as 0 and English near 0.7. */
+export function englishLetterFit(counts: ArrayLike<number>, letters: number): number {
+  return clamp01((letterFit(counts, letters) - UNIFORM_FIT) / (1 - UNIFORM_FIT))
 }
 
 /**
@@ -139,10 +151,10 @@ export function englishScore(bytes: Uint8Array): number {
   const pr = printable / bytes.length
   if (pr < 0.5 || letters < 2) return pr * 0.05
 
-  const fit = letterFit(counts, letters)
+  const fit = englishLetterFit(counts, letters)
   const text = decodeLatin1(bytes).toLowerCase()
   let hits = 0
-  for (const w of COMMON_WORDS) if (text.includes(w)) hits++
+  for (const re of WORD_RES) if (re.test(text)) hits++
   const words = Math.min(1, hits / 5)
   const spaceRatio = spaces / bytes.length
   const spacing = spaceRatio >= 0.05 && spaceRatio <= 0.3 ? 1 : spaceRatio > 0 ? 0.4 : 0
@@ -161,7 +173,7 @@ export function wordHits(bytes: Uint8Array): number {
   if (bytes.length === 0) return 0
   const text = decodeLatin1(bytes).toLowerCase()
   let hits = 0
-  for (const w of COMMON_WORDS) if (text.includes(w)) hits++
+  for (const re of WORD_RES) if (re.test(text)) hits++
   return hits
 }
 

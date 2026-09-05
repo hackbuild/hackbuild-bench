@@ -10,16 +10,17 @@ import type { DeviceSession } from '@/core/drivers/types'
  * is no label-only action: if the panel offers it, it does something.
  */
 
-export type TriggerType = 'any' | 'packet' | 'line' | 'transcript' | 'reading'
+export type TriggerType = 'any' | 'packet' | 'line' | 'reading'
 
 export interface TriggerConfig {
   type: TriggerType
   /** Watch one device, or any device when empty. */
   deviceId?: string
-  /** Substring for packet and line triggers, exact word for transcript. */
+  /** Substring for packet and line triggers. */
   match?: string
-  /** For a reading trigger: fire when the named reading crosses above this. */
+  /** For a reading trigger: the named reading, empty for any name. */
   readingName?: string
+  /** For a reading trigger: no match until the reading sits above this. */
   above?: number
 }
 
@@ -53,6 +54,10 @@ export interface ActionEnv {
 type PinSession = DeviceSession & {
   setPinMode(pin: number, mode: string): Promise<void>
   writePin(pin: number, value: number): Promise<void>
+}
+
+type TunerSession = DeviceSession & {
+  isTransmitting?(): boolean
 }
 
 function describeArtifact(a: Artifact): string {
@@ -117,6 +122,20 @@ export function buildPerform(
         if (action.deviceId === undefined || action.hz === undefined) {
           throw new Error('this rule has no radio or frequency set')
         }
+        const node = bus.node(action.deviceId)
+        if (!node) throw new Error('the action radio is not connected')
+        if (
+          !node.capabilities.includes(CAPABILITIES.OBSERVE_SPECTRUM) &&
+          !node.capabilities.includes(CAPABILITIES.AUDIO_DEMOD)
+        ) {
+          throw new Error(`${node.label} does not tune`)
+        }
+        const session = bus.session<TunerSession>(action.deviceId)
+        // moving a live carrier would put energy on a frequency the user never
+        // confirmed, so a rule waits for transmit to end.
+        if (session?.isTransmitting?.()) {
+          throw new Error(`${node.label} is transmitting, stop it before a rule can retune it`)
+        }
         await bus.configure(action.deviceId, { centerHz: action.hz })
       }
 
@@ -138,13 +157,11 @@ export function triggerMatches(trigger: TriggerConfig, a: Artifact): boolean {
     case 'line':
       if (a.kind !== 'line') return false
       return !trigger.match || a.text.toLowerCase().includes(trigger.match.toLowerCase())
-    case 'transcript':
-      if (a.kind !== 'transcript') return false
-      return !trigger.match || a.word.toLowerCase() === trigger.match.toLowerCase()
     case 'reading':
       if (a.kind !== 'reading') return false
+      if (trigger.above === undefined) return false
       if (trigger.readingName && a.name !== trigger.readingName) return false
-      return trigger.above === undefined || a.value > trigger.above
+      return a.value > trigger.above
     default:
       return false
   }
@@ -154,8 +171,7 @@ export const TRIGGER_LABELS: Record<TriggerType, string> = {
   any: 'anything seen',
   packet: 'a packet matching',
   line: 'a serial line matching',
-  transcript: 'a spoken word',
-  reading: 'a reading crossing',
+  reading: 'a reading above',
 }
 
 export const ACTION_LABELS: Record<ActionType, string> = {

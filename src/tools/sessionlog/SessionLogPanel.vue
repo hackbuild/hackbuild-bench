@@ -7,14 +7,23 @@ import { formatClock } from '@/core/format'
 
 const log = useSessionLog()
 
+// 'note' is not filterable, so a note row falls back to its raw kind.
+const KINDS: Array<{ id: LogKind; one: string; many: string }> = [
+  { id: 'event', one: 'event', many: 'events' },
+  { id: 'packet', one: 'packet', many: 'packets' },
+  { id: 'line', one: 'serial', many: 'serial' },
+  { id: 'transcript', one: 'speech', many: 'speech' },
+  { id: 'reading', one: 'reading', many: 'readings' },
+  { id: 'error', one: 'error', many: 'errors' },
+]
+
+const KIND_LABEL: Partial<Record<LogKind, string>> = Object.fromEntries(
+  KINDS.map((k) => [k.id, k.one]),
+)
+
 const FILTERS: Array<{ id: LogKind | 'all'; label: string }> = [
   { id: 'all', label: 'all' },
-  { id: 'event', label: 'events' },
-  { id: 'packet', label: 'packets' },
-  { id: 'line', label: 'serial' },
-  { id: 'transcript', label: 'speech' },
-  { id: 'reading', label: 'readings' },
-  { id: 'error', label: 'errors' },
+  ...KINDS.map((k) => ({ id: k.id, label: k.many })),
 ]
 
 const filter = ref<LogKind | 'all'>('all')
@@ -82,7 +91,7 @@ function exportLog(): void {
     <div class="bn-list" style="max-height: 60vh">
       <div v-for="e in shown.slice(0, 500)" :key="e.id" class="bn-row">
         <span class="bn-a" :style="kindColor(e.kind)">{{ e.message }}</span>
-        <span class="bn-b">{{ e.source }}</span>
+        <span class="bn-b">{{ KIND_LABEL[e.kind] ?? e.kind }}<template v-if="e.source"> · {{ e.source }}</template></span>
         <span class="bn-c">{{ formatClock(e.at) }}</span>
       </div>
       <div v-if="!shown.length" class="bn-row">

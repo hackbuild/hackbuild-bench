@@ -26,8 +26,8 @@ interface Bar {
   height: string
 }
 
-/** Bars are a fixed scale. The level decides how many stand up, not how tall
- * the scale is, so the hot quarter stays in the same place. */
+/** Bars are a fixed scale. The level decides how many stand up, so the hot
+ * quarter sits in the same place at every level. */
 const segments = computed<Bar[]>(() => {
   const count = Math.max(1, Math.round(props.bars))
   const out: Bar[] = []
@@ -48,7 +48,8 @@ const readout = computed(() => `${Math.round(props.db)} dB`)
     :aria-valuenow="Math.round(db)"
     :aria-valuemin="floorDb"
     :aria-valuemax="ceilDb"
-    :aria-label="'signal level, ' + readout"
+    :aria-valuetext="readout"
+    aria-label="signal level"
   >
     <i
       v-for="(bar, i) in segments"

@@ -20,11 +20,23 @@ const radioDevices = computed(() =>
   devices.nodes.filter((n) => n.capabilities.includes(CAPABILITIES.AUDIO_DEMOD)),
 )
 
-const TRIGGERS: TriggerType[] = ['any', 'packet', 'line', 'transcript', 'reading']
+const TRIGGERS: TriggerType[] = ['any', 'packet', 'line', 'reading']
 const ACTIONS: ActionType[] = ['log', 'notify', 'record', 'pin', 'retune']
 
 function needsMatch(t: TriggerType): boolean {
-  return t === 'packet' || t === 'line' || t === 'transcript'
+  return t === 'packet' || t === 'line'
+}
+
+/** An empty or unparsable field leaves the value unset. */
+function numberOrUndefined(raw: string): number | undefined {
+  if (raw.trim() === '') return undefined
+  const n = Number(raw)
+  return Number.isFinite(n) ? n : undefined
+}
+
+function mhzToHz(raw: string): number | undefined {
+  const mhz = numberOrUndefined(raw)
+  return mhz === undefined ? undefined : mhz * 1e6
 }
 
 function setTrigger(rule: Rule, patch: Partial<Rule['trigger']>): void {
@@ -33,19 +45,37 @@ function setTrigger(rule: Rule, patch: Partial<Rule['trigger']>): void {
 function setCondition(rule: Rule, patch: Partial<Rule['condition']>): void {
   rules.update(rule.id, { condition: { ...rule.condition, ...patch } })
 }
+/** The pin mode is the one field the panel shows a value for before it is set. */
+function blankAction(type: ActionType): Rule['action'] {
+  return type === 'pin' ? { type, pinMode: 'pulse' } : { type }
+}
+
 function setAction(rule: Rule, patch: Partial<Rule['action']>): void {
-  rules.update(rule.id, { action: { ...rule.action, ...patch } })
+  const action = patch.type ? blankAction(patch.type) : { ...rule.action, ...patch }
+  rules.update(rule.id, { action })
+}
+
+function triggerReady(rule: Rule): string | null {
+  if (rule.trigger.type === 'reading' && rule.trigger.above === undefined) {
+    return 'set a threshold'
+  }
+  return null
 }
 
 function actionReady(rule: Rule): string | null {
   const a = rule.action
   if (a.type === 'pin') {
     if (a.deviceId === undefined) return 'pick a board'
-    const node = devices.nodes.find((n) => n.id === a.deviceId)
+    const node = pinDevices.value.find((n) => n.id === a.deviceId)
     if (!node) return 'the board is gone'
     if (!node.armed.includes(CAPABILITIES.GPIO_DRIVE)) return `arm gpio drive on ${node.label}`
+    if (a.pin === undefined) return 'set a pin'
   }
-  if (a.type === 'retune' && a.deviceId === undefined) return 'pick a radio'
+  if (a.type === 'retune') {
+    if (a.deviceId === undefined) return 'pick a radio'
+    if (!radioDevices.value.some((n) => n.id === a.deviceId)) return 'the radio is gone'
+    if (a.hz === undefined) return 'set a frequency'
+  }
   return null
 }
 </script>
@@ -73,12 +103,14 @@ function actionReady(rule: Rule): string | null {
           <div class="bn-nb">
             <select
               :value="rule.trigger.type"
+              aria-label="trigger"
               @change="setTrigger(rule, { type: ($event.target as HTMLSelectElement).value as TriggerType })"
             >
               <option v-for="t in TRIGGERS" :key="t" :value="t">{{ TRIGGER_LABELS[t] }}</option>
             </select>
             <select
               :value="rule.trigger.deviceId ?? ''"
+              aria-label="trigger device"
               @change="setTrigger(rule, { deviceId: ($event.target as HTMLSelectElement).value || undefined })"
             >
               <option value="">on any device</option>
@@ -89,8 +121,25 @@ function actionReady(rule: Rule): string | null {
               type="text"
               :value="rule.trigger.match ?? ''"
               placeholder="text to match"
+              aria-label="text to match"
               @input="setTrigger(rule, { match: ($event.target as HTMLInputElement).value })"
             />
+            <template v-else-if="rule.trigger.type === 'reading'">
+              <input
+                type="text"
+                :value="rule.trigger.readingName ?? ''"
+                placeholder="reading name, for example pin 2"
+                aria-label="reading name"
+                @input="setTrigger(rule, { readingName: ($event.target as HTMLInputElement).value || undefined })"
+              />
+              <input
+                type="number"
+                :value="rule.trigger.above ?? ''"
+                placeholder="above"
+                aria-label="fires above this value"
+                @input="setTrigger(rule, { above: numberOrUndefined(($event.target as HTMLInputElement).value) })"
+              />
+            </template>
           </div>
         </div>
 
@@ -99,8 +148,9 @@ function actionReady(rule: Rule): string | null {
         <div class="bn-node is-condition">
           <div class="bn-nh"><HbIcon name="filter" :size="9" />if</div>
           <div class="bn-nb">
-            <label class="bn-klabel">rate limit</label>
+            <label class="bn-klabel" :for="`${rule.id}-gap`">rate limit</label>
             <select
+              :id="`${rule.id}-gap`"
               :value="rule.condition.minGapMs"
               @change="setCondition(rule, { minGapMs: Number(($event.target as HTMLSelectElement).value) })"
             >
@@ -120,6 +170,7 @@ function actionReady(rule: Rule): string | null {
           <div class="bn-nb">
             <select
               :value="rule.action.type"
+              aria-label="action"
               @change="setAction(rule, { type: ($event.target as HTMLSelectElement).value as ActionType })"
             >
               <option v-for="a in ACTIONS" :key="a" :value="a">{{ ACTION_LABELS[a] }}</option>
@@ -128,6 +179,7 @@ function actionReady(rule: Rule): string | null {
             <template v-if="rule.action.type === 'pin'">
               <select
                 :value="rule.action.deviceId ?? ''"
+                aria-label="action board"
                 @change="setAction(rule, { deviceId: ($event.target as HTMLSelectElement).value || undefined })"
               >
                 <option value="">pick a board</option>
@@ -135,12 +187,14 @@ function actionReady(rule: Rule): string | null {
               </select>
               <input
                 type="number"
-                :value="rule.action.pin ?? 2"
+                :value="rule.action.pin ?? ''"
                 placeholder="pin"
-                @input="setAction(rule, { pin: Number(($event.target as HTMLInputElement).value) })"
+                aria-label="pin number"
+                @input="setAction(rule, { pin: numberOrUndefined(($event.target as HTMLInputElement).value) })"
               />
               <select
                 :value="rule.action.pinMode ?? 'pulse'"
+                aria-label="pin mode"
                 @change="setAction(rule, { pinMode: ($event.target as HTMLSelectElement).value as 'high' | 'low' | 'pulse' })"
               >
                 <option value="pulse">pulse</option>
@@ -152,6 +206,7 @@ function actionReady(rule: Rule): string | null {
             <template v-else-if="rule.action.type === 'retune'">
               <select
                 :value="rule.action.deviceId ?? ''"
+                aria-label="action radio"
                 @change="setAction(rule, { deviceId: ($event.target as HTMLSelectElement).value || undefined })"
               >
                 <option value="">pick a radio</option>
@@ -159,10 +214,11 @@ function actionReady(rule: Rule): string | null {
               </select>
               <input
                 type="number"
-                :value="rule.action.hz ? rule.action.hz / 1e6 : 100.3"
+                :value="rule.action.hz === undefined ? '' : rule.action.hz / 1e6"
                 step="0.001"
                 placeholder="MHz"
-                @input="setAction(rule, { hz: Number(($event.target as HTMLInputElement).value) * 1e6 })"
+                aria-label="frequency in MHz"
+                @input="setAction(rule, { hz: mhzToHz(($event.target as HTMLInputElement).value) })"
               />
             </template>
 
@@ -171,6 +227,7 @@ function actionReady(rule: Rule): string | null {
               type="text"
               :value="rule.action.message ?? ''"
               placeholder="message, or leave blank to quote the trigger"
+              aria-label="message"
               @input="setAction(rule, { message: ($event.target as HTMLInputElement).value })"
             />
           </div>
@@ -182,12 +239,17 @@ function actionReady(rule: Rule): string | null {
           type="button"
           class="bn-toggle"
           :class="{ 'is-on': rule.enabled }"
+          :aria-pressed="rule.enabled"
           @click="rules.toggle(rule.id)"
         >
           <span class="bn-sw"><i></i></span>{{ rule.enabled ? 'armed' : 'off' }}
         </button>
         <span class="bn-chipx">fired {{ rule.fired }}</span>
+        <span v-if="rule.lastFiredAt" class="bn-chipx">last {{ formatClock(rule.lastFiredAt) }}</span>
         <button type="button" class="bn-tinyact" @click="rules.test(rule.id)">test now</button>
+        <span v-if="triggerReady(rule)" class="bn-chipx" style="border-color: var(--hb-warn); color: var(--hb-warn)">
+          {{ triggerReady(rule) }}
+        </span>
         <span v-if="actionReady(rule)" class="bn-chipx" style="border-color: var(--hb-warn); color: var(--hb-warn)">
           {{ actionReady(rule) }}
         </span>
@@ -198,8 +260,9 @@ function actionReady(rule: Rule): string | null {
 
     <p v-if="!rules.rules.length && sources.length" class="bn-note" style="margin-top: 0">
       nothing wired up yet. a rule watches one device stream and runs an action, so a frame
-      seen on a radio can pulse a pin on a board, a spoken word can start a recording, or a
-      matched serial line can notify you. build one, press test now to see it work, then arm it.
+      seen on a radio can pulse a pin on a board, a reading above a threshold can start a
+      recording, or a matched serial line can notify you. build one, press test now to see it
+      work, then arm it.
     </p>
 
     <div v-if="rules.log.length" class="bn-subhead" style="margin-top: 16px">what fired</div>

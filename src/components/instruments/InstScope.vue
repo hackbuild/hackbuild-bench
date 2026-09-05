@@ -1,6 +1,22 @@
 <script setup lang="ts">
-import { onBeforeUnmount, onMounted, ref, watch } from 'vue'
-import { AutoRange, fitCanvas, normalise, prefersReducedMotion, readTokens } from './canvas'
+import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import {
+  AutoRange,
+  HANDLE_PX,
+  KEY_STEP,
+  SLOP,
+  arrowStep,
+  clamp01,
+  fitCanvas,
+  handleLeft,
+  markerKeyTarget,
+  markerReadout,
+  normalise,
+  onReducedMotion,
+  peakAt,
+  prefersReducedMotion,
+  readTokens,
+} from './canvas'
 import type { ScreenTokens } from './canvas'
 
 interface Props {
@@ -40,10 +56,12 @@ const emit = defineEmits<{ tune: [fraction: number]; width: [fraction: number] }
 const range = new AutoRange()
 
 const canvas = ref<HTMLCanvasElement | null>(null)
+const handle = ref<HTMLElement | null>(null)
 let tokens: ScreenTokens | null = null
 let raf = 0
 let phase = 0
 let observer: ResizeObserver | null = null
+let stopMotion: (() => void) | null = null
 
 function graticule(ctx: CanvasRenderingContext2D, w: number, h: number, colour: string): void {
   ctx.save()
@@ -69,8 +87,7 @@ function traceBins(
   const win = props.auto ? range.update(bins) : { minDb: props.minDb, maxDb: props.maxDb }
   ctx.beginPath()
   for (let x = 0; x < w; x++) {
-    const i = Math.min(bins.length - 1, Math.floor((x / w) * bins.length))
-    const y = h - 2 - normalise(bins[i], win.minDb, win.maxDb) * (h - 4)
+    const y = h - 2 - normalise(peakAt(bins, x, w), win.minDb, win.maxDb) * (h - 4)
     if (x) ctx.lineTo(x, y)
     else ctx.moveTo(x, y)
   }
@@ -98,8 +115,8 @@ function tracePlaceholder(ctx: CanvasRenderingContext2D, w: number, h: number): 
 }
 
 /**
- * The listening point and the slice being demodulated around it. Drawn over
- * the trace so it reads as an overlay on the signal, not part of it.
+ * The listening point and the slice being demodulated around it. It draws
+ * after the trace, so the overlay sits on top of the signal it marks.
  */
 function drawMarker(ctx: CanvasRenderingContext2D, w: number, h: number): void {
   const m = props.marker
@@ -135,6 +152,8 @@ function draw(): void {
 
 type Grab = 'centre' | 'low' | 'high'
 let dragging: Grab | null = null
+let downX = 0
+let moved = false
 
 function fractionAt(ev: PointerEvent): number {
   const el = canvas.value
@@ -155,25 +174,62 @@ function onDown(ev: PointerEvent): void {
   const grab = r.width > 0 ? 7 / r.width : 0.01
   if (half > 0 && Math.abs(f - (centre - half)) < grab) dragging = 'low'
   else if (half > 0 && Math.abs(f - (centre + half)) < grab) dragging = 'high'
-  else {
-    dragging = 'centre'
-    emit('tune', f)
-  }
+  else dragging = 'centre'
+  downX = ev.clientX
+  moved = false
   el.setPointerCapture(ev.pointerId)
   ev.preventDefault()
+  // the pointer target and the keyboard target are different nodes, and
+  // preventDefault suppresses the focus a click would give the one it hit.
+  handle.value?.focus({ preventScroll: true })
 }
 
 function onMove(ev: PointerEvent): void {
   if (!dragging) return
-  const f = fractionAt(ev)
-  if (dragging === 'centre') emit('tune', f)
-  else emit('width', Math.abs(f - (props.marker ?? 0.5)) * 2)
+  if (dragging === 'centre') {
+    // a touch that becomes a page scroll must not tune on its way past.
+    if (!moved && Math.abs(ev.clientX - downX) <= SLOP) return
+    moved = true
+    emit('tune', fractionAt(ev))
+    return
+  }
+  emit('width', Math.abs(fractionAt(ev) - (props.marker ?? 0.5)) * 2)
 }
 
 function onUp(ev: PointerEvent): void {
   if (!dragging) return
+  if (dragging === 'centre' && !moved) emit('tune', fractionAt(ev))
+  onCancel(ev)
+}
+
+function onCancel(ev: PointerEvent): void {
+  if (!dragging) return
   dragging = null
-  canvas.value?.releasePointerCapture(ev.pointerId)
+  const el = canvas.value
+  if (el?.hasPointerCapture(ev.pointerId)) el.releasePointerCapture(ev.pointerId)
+}
+
+/** The canvas hands its role to the slider only when there is a slider. */
+const hasHandle = computed(
+  () => props.interactive && props.marker !== null && props.marker !== undefined,
+)
+
+const markerNow = computed(() => Number((props.marker ?? 0.5).toFixed(3)))
+
+const markerText = computed(() => markerReadout(props.marker, props.markerWidth))
+
+function onKey(ev: KeyboardEvent): void {
+  const dir = arrowStep(ev.key)
+  if (ev.shiftKey) {
+    if (!dir) return
+    emit('width', clamp01((props.markerWidth ?? 0) + dir * KEY_STEP))
+    ev.preventDefault()
+    return
+  }
+  const next = markerKeyTarget(ev.key, props.marker ?? 0.5)
+  if (next === null) return
+  emit('tune', next)
+  ev.preventDefault()
 }
 
 function animating(): boolean {
@@ -199,6 +255,7 @@ onMounted(() => {
   tokens = readTokens(el)
   observer = new ResizeObserver(() => draw())
   observer.observe(el)
+  stopMotion = onReducedMotion(() => restart())
   restart()
 })
 
@@ -206,6 +263,8 @@ onBeforeUnmount(() => {
   cancelAnimationFrame(raf)
   observer?.disconnect()
   observer = null
+  stopMotion?.()
+  stopMotion = null
 })
 
 // A frame arrives as a new array. Mutating one in place will not repaint.
@@ -228,13 +287,34 @@ watch(
     <canvas
       ref="canvas"
       style="height: 100%"
-      :style="{ touchAction: interactive ? 'none' : undefined, cursor: interactive ? 'ew-resize' : undefined }"
-      role="img"
-      aria-label="spectrum trace"
+      :style="{ touchAction: interactive ? 'pan-y' : undefined, cursor: interactive ? 'ew-resize' : undefined }"
+      :role="hasHandle ? undefined : 'img'"
+      :aria-label="hasHandle ? undefined : 'spectrum trace'"
+      :aria-hidden="hasHandle ? 'true' : undefined"
       @pointerdown="onDown"
       @pointermove="onMove"
       @pointerup="onUp"
-      @pointercancel="onUp"
+      @pointercancel="onCancel"
     ></canvas>
+    <div
+      v-if="hasHandle"
+      ref="handle"
+      role="slider"
+      tabindex="0"
+      aria-label="listening point, spectrum"
+      :aria-valuemin="0"
+      :aria-valuemax="1"
+      :aria-valuenow="markerNow"
+      :aria-valuetext="markerText"
+      :style="{
+        position: 'absolute',
+        top: 0,
+        bottom: 0,
+        left: handleLeft(marker ?? 0.5),
+        width: HANDLE_PX + 'px',
+        pointerEvents: 'none',
+      }"
+      @keydown="onKey"
+    ></div>
   </div>
 </template>

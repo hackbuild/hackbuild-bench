@@ -29,10 +29,13 @@ type MeshSession = DeviceSession & {
 /** Nodes the radio has heard, newest position wins. */
 const nodes = computed(() => {
   const seen = new Map<string, Record<string, unknown>>()
+  // packets arrive newest first, so an entry already in the map came from a
+  // later reading than the one being merged and keeps its fields.
   for (const p of stream.packets.value) {
     const f = p.fields ?? {}
     if (f.type !== 'nodeinfo' && f.nodeNum === undefined) continue
-    seen.set(String(f.nodeNum), { ...seen.get(String(f.nodeNum)), ...f, at: p.wall })
+    const key = String(f.nodeNum)
+    seen.set(key, { ...f, ...seen.get(key) })
   }
   return [...seen.values()]
 })

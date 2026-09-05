@@ -8,7 +8,8 @@ type EventListener = (e: BusEvent) => void
 
 interface Live {
   node: DeviceNode
-  session: DeviceSession
+  /** Null between attach() inserting the entry and driver.open() returning. */
+  session: DeviceSession | null
   driver: DeviceDriver
   abort: AbortController
   seq: number
@@ -62,7 +63,7 @@ export class DeviceBus {
    * have gets undefined back and must handle it.
    */
   session<T extends DeviceSession = DeviceSession>(id: string): T | undefined {
-    return this.live.get(id)?.session as T | undefined
+    return (this.live.get(id)?.session ?? undefined) as T | undefined
   }
 
   // -------------------------------------------------------------------------
@@ -103,13 +104,17 @@ export class DeviceBus {
     if (!driver) throw new Error(`no driver registered for ${handle.kind}`)
 
     const id = `${handle.kind}-${++this.counter}`
-    const sameKind = this.nodes.filter((n) => n.kind === handle.kind).length
+    // the suffix is the first free slot for this kind, so two live units never
+    // collide and a lone device that reconnects gets its plain label back.
+    const taken = new Set(this.nodes.filter((n) => n.kind === handle.kind).map((n) => n.label))
+    let label = handle.label
+    for (let n = 2; taken.has(label); n++) label = `${handle.label} ${n}`
     const abort = new AbortController()
 
     const node: DeviceNode = {
       id,
       kind: handle.kind,
-      label: sameKind > 0 ? `${handle.label} ${sameKind + 1}` : handle.label,
+      label,
       descriptor: driver.descriptor,
       transport: handle.transport,
       status: 'opening',
@@ -120,7 +125,7 @@ export class DeviceBus {
       connectedAt: Date.now(),
     }
 
-    const entry: Live = { node, session: null as unknown as DeviceSession, driver, abort, seq: 0 }
+    const entry: Live = { node, session: null, driver, abort, seq: 0 }
     this.live.set(id, entry)
     this.fire({ type: 'attached', deviceId: id, at: Date.now() })
 
@@ -138,8 +143,8 @@ export class DeviceBus {
     try {
       const session = await driver.open(handle, ctx)
       entry.session = session
-      // the panel reads node.params, which came from the descriptor defaults.
-      // push them once so the session is not running on its own idea of them.
+      // the panel shows node.params from the descriptor defaults, so the session
+      // has to hold those same values before the first knob move.
       try {
         await session.configure({ ...node.params })
       } catch (err) {
@@ -185,18 +190,35 @@ export class DeviceBus {
   // -------------------------------------------------------------------------
 
   async configure(id: string, params: Record<string, number>): Promise<void> {
-    const entry = this.expect(id)
-    Object.assign(entry.node.params, params)
-    await entry.session.configure(entry.node.params)
+    const entry = this.expectSession(id)
+    const prev = { ...entry.node.params }
+    const next = { ...entry.node.params, ...params }
+    try {
+      await entry.session.configure(next)
+    } catch (err) {
+      // the panel must not show a value the radio rejected.
+      entry.node.params = prev
+      const why = err instanceof Error ? err.message : String(err)
+      // a sweep that hops through a refused range must not fill the session log
+      // with one line per hop.
+      if (entry.node.error !== why) {
+        this.fire({ type: 'error', deviceId: id, message: why, at: Date.now() })
+      }
+      entry.node.error = why
+      throw err
+    }
+    entry.node.params = next
+    entry.node.error = undefined
     this.fire({ type: 'params', deviceId: id, at: Date.now() })
   }
 
   async start(id: string, mode: string): Promise<void> {
-    const entry = this.expect(id)
+    const entry = this.expectSession(id)
     entry.node.status = 'streaming'
     this.fire({ type: 'status', deviceId: id, at: Date.now() })
     try {
       await entry.session.start(mode)
+      entry.node.error = undefined
     } catch (err) {
       entry.node.status = 'error'
       entry.node.error = err instanceof Error ? err.message : String(err)
@@ -206,8 +228,16 @@ export class DeviceBus {
   }
 
   async stop(id: string): Promise<void> {
-    const entry = this.expect(id)
-    await entry.session.stop()
+    const entry = this.expectSession(id)
+    try {
+      await entry.session.stop()
+    } catch (err) {
+      entry.node.status = 'error'
+      entry.node.error = err instanceof Error ? err.message : String(err)
+      this.fire({ type: 'error', deviceId: id, message: entry.node.error, at: Date.now() })
+      throw err
+    }
+    entry.node.error = undefined
     entry.node.status = 'idle'
     this.fire({ type: 'status', deviceId: id, at: Date.now() })
   }
@@ -227,11 +257,6 @@ export class DeviceBus {
     const entry = this.expect(id)
     entry.node.armed = entry.node.armed.filter((c) => c !== cap)
     this.fire({ type: 'armed', deviceId: id, at: Date.now() })
-  }
-
-  rename(id: string, label: string): void {
-    this.expect(id).node.label = label
-    this.fire({ type: 'status', deviceId: id, at: Date.now() })
   }
 
   // -------------------------------------------------------------------------
@@ -268,6 +293,12 @@ export class DeviceBus {
     const entry = this.live.get(id)
     if (!entry) throw new Error(`device ${id} is not attached`)
     return entry
+  }
+
+  private expectSession(id: string): Live & { session: DeviceSession } {
+    const entry = this.expect(id)
+    if (!entry.session) throw new Error(`device ${id} never finished opening`)
+    return entry as Live & { session: DeviceSession }
   }
 
   /**

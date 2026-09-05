@@ -22,12 +22,14 @@ const streaming = computed(() => node.value?.status === 'streaming')
 const params = computed(() => node.value?.descriptor.params ?? [])
 const sim = computed(() => isSimKind(node.value?.kind ?? ''))
 
-// the animated trace is made up. only a simulated radio may draw it, otherwise
-// an idle hackrf looks like it is receiving three carriers that are not there.
+// the animated trace is invented, so only a simulated radio may draw it.
 const placeholder = computed(() => !streaming.value && sim.value)
 
+/** The dial and the receive gain, whatever a given radio calls it. */
+const EASY = ['centerHz', 'channel', 'gain', 'lna', 'vga']
+
 const visible = computed(() =>
-  params.value.filter((p) => bench.advanced || ['centerHz', 'gain', 'channel'].includes(p.key)),
+  params.value.filter((p) => bench.advanced || EASY.includes(p.key)),
 )
 
 function model(key: string) {
@@ -53,9 +55,9 @@ const canWideSweep = computed(() =>
 let startedHere = false
 
 async function sweep(): Promise<void> {
-  // the hackrf steps a real wideband panorama; other radios show the
-  // instantaneous window they are tuned to.
-  const mode = node.value?.kind === 'ubertooth' ? 'spectrum' : canWideSweep.value ? 'sweep' : 'rx'
+  // a radio that can step across a range draws a real wideband panorama, the
+  // rest show the instantaneous window they are tuned to.
+  const mode = canWideSweep.value ? 'sweep' : 'spectrum'
   await devices.start(props.deviceId, mode)
   startedHere = true
 }

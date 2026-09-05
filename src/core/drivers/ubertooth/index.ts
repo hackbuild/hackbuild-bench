@@ -90,7 +90,7 @@ export const ubertoothDescriptor: DeviceDescriptor = {
     [CAPABILITIES.OBSERVE_SPECTRUM]:
       'the sweep covers 2402 to 2480 MHz, one bin per MHz. it cannot see any other band.',
     [CAPABILITIES.CAPTURE_PACKET]:
-      'ble advertisements decode in full. classic br/edr is a lap survey off raw symbols, so addresses are partial and some rows are noise.',
+      'ble advertisements decode on one advertising channel at a time, 37 by default. classic br/edr is a lap survey off raw symbols, so addresses are partial and some rows are noise.',
   },
 }
 
@@ -277,10 +277,14 @@ class UbertoothSession implements DeviceSession {
   }
 
   async configure(params: Record<string, number>): Promise<void> {
-    const previous = this.params.channel
+    const prevChannel = this.params.channel
+    const prevAdv = this.params.advChannel
     this.params = { ...this.params, ...params }
-    if (this.mode === 'classic' && this.params.channel !== previous) {
+    if (this.mode === 'classic' && this.params.channel !== prevChannel) {
       await this.setChannel(Math.round(this.params.channel))
+    }
+    if (this.mode === 'ble' && this.params.advChannel !== prevAdv) {
+      await this.setChannel(advFreq(Math.round(this.params.advChannel)))
     }
   }
 
@@ -441,6 +445,7 @@ class UbertoothSession implements DeviceSession {
       length: adv.length,
     }
     if (adv.advertiser) fields.advertiser = adv.advertiser
+    if (adv.target) fields.target = adv.target
     if (adv.flags !== undefined) fields.flags = `0x${adv.flags.toString(16).padStart(2, '0')}`
     if (adv.name) fields.name = adv.name
     if (adv.serviceUuids.length) fields.serviceUuids = adv.serviceUuids
@@ -483,12 +488,10 @@ class UbertoothSession implements DeviceSession {
         channel: p.channel,
         clk100ns: p.clk100ns,
       }
-      // libubertooth needs repeats before a LAP is worth an address guess.
-      if (seen.count >= 12) {
-        const uap = (lap >> 4) & 0xff
-        fields.uapEstimate = `0x${uap.toString(16).padStart(2, '0')}`
-        fields.bdaddrEstimate = `??:??:${uap.toString(16).padStart(2, '0')}:${lapHex.slice(0, 2)}:${lapHex.slice(2, 4)}:${lapHex.slice(4, 6)}`
-      }
+      // extractLaps produces false hits, so a LAP is only trusted after repeats.
+      // the uap is a separate address byte recovered by brute forcing the packet
+      // header hec, which the bench does not do, so no address is offered.
+      fields.lapState = seen.count >= 12 ? 'confirmed' : 'unconfirmed'
 
       const record: Emitted<PacketRecord> = {
         kind: 'packet',

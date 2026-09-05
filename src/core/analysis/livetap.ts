@@ -247,6 +247,25 @@ export class LiveTap {
   private bestPeriod(window: Uint8Array): { period: number; confidence: number } | null {
     const n = window.length
     if (n < 64) return null
+    // a constant or near-constant window self-matches at every period, so any
+    // period would score 1.0. variety is required before a repeat counts as
+    // framing, which also rejects a sparse two or three value protocol.
+    // hist holds the counts for exactly these bytes, so n is this.filled.
+    let distinct = 0
+    let top1 = 0
+    let top2 = 0
+    for (let b = 0; b < 256; b++) {
+      const c = this.hist[b]
+      if (c === 0) continue
+      distinct++
+      if (c > top1) {
+        top2 = top1
+        top1 = c
+      } else if (c > top2) {
+        top2 = c
+      }
+    }
+    if (distinct < 4 || (top1 + top2) / n > 0.9) return null
     const limit = Math.min(256, Math.floor(n / 3))
     let best: { period: number; confidence: number } | null = null
     for (let p = 2; p <= limit; p++) {

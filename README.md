@@ -21,8 +21,12 @@ Supported today:
 | HackRF One | WebUSB | wideband receive, IQ capture, transmit behind one confirm |
 | Ubertooth One | WebUSB | 2.4 GHz spectrum, BLE and classic sniffing |
 | Meshtastic | Web Serial, Web Bluetooth | node list, position, messages, send behind one confirm |
-| ESP32 | Web Serial | serial console, auto baud, pins, i2c, servo |
+| ESP32 | Web Serial | serial console, auto baud |
+| Conduyt board | Web Serial, Web Bluetooth | pin grid, pwm, i2c scan and read, datastreams, plus whatever modules the board reports (servo, neopixel) |
 | WiFi Pineapple | HTTP | passive survey, client and access point inventory |
+
+Conduyt is free firmware you flash onto a maker board you already have. Flash it
+at conduyt.io/playground and the board comes back here as a conduyt node.
 
 ## Running it
 

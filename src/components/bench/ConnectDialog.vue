@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, ref } from 'vue'
+import { computed, ref, watch } from 'vue'
 import { HbButton, HbIcon, HbModal } from '@virgilvox/hackbuild-ui'
 import type { IconName } from '@virgilvox/hackbuild-ui'
 import { DRIVERS } from '@/core/drivers/registry'
@@ -19,6 +19,11 @@ const demo = useDemoMode()
 const support = transportSupport()
 const expanded = ref<string | null>(null)
 const fields = ref<Record<string, string>>({})
+const connectError = ref<string | null>(null)
+
+watch(dialog.isOpen, () => {
+  connectError.value = null
+})
 
 /** A driver is reachable when at least one of its transports is available. */
 function reachable(d: DeviceDriver): boolean {
@@ -64,12 +69,21 @@ function toggle(d: DeviceDriver): void {
 }
 
 async function go(d: DeviceDriver, transport: TransportKind): Promise<void> {
+  connectError.value = null
+  // the health poll fires an error every four seconds and the store's lastError
+  // takes the last of any of them, so a device that was already on the bus when
+  // this attempt started owns its own message and not this banner.
+  const before = new Set(devices.nodes.map((n) => n.id))
   const node = await devices.connect(d.descriptor.kind, transport, { ...fields.value })
   if (node) {
     bench.setView('focus')
     dialog.close()
     expanded.value = null
+    return
   }
+  const why = devices.lastError
+  const elsewhere = devices.nodes.some((n) => before.has(n.id) && n.error === why)
+  connectError.value = why && !elsewhere ? `${d.descriptor.name}: ${why}` : null
 }
 
 async function startDemo(): Promise<void> {
@@ -94,9 +108,9 @@ const sorted = computed(() =>
       bridge. picking a device opens the browser permission prompt.
     </p>
 
-    <div v-if="devices.lastError" class="bn-banner is-err">
+    <div v-if="connectError" class="bn-banner is-err">
       <HbIcon name="warning" />
-      <span>{{ devices.lastError }}</span>
+      <span>{{ connectError }}</span>
     </div>
 
     <div class="bn-devs" style="padding: 0; gap: 10px; margin-top: 12px">

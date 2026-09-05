@@ -16,6 +16,9 @@
   --bn-pink-paper: #fff5fa;
   /* the playful accent. one hue, used only by the roll and ghost surfaces. */
   --bn-goo: #ff6b00;
+  /* solid label on the void ground. --hb-lit-dim is translucent and reads at
+     2.91:1, which fails AA for the small labels that carry meaning. */
+  --bn-label-void: #9a9184;
 
   --bn-rail: 258px;
   --bn-top: 54px;
@@ -48,6 +51,10 @@ textarea {
 }
 button {
   cursor: pointer;
+}
+.bn-app :focus-visible {
+  outline: var(--hb-border-hd) solid var(--hb-pink);
+  outline-offset: 2px;
 }
 canvas {
   display: block;
@@ -785,7 +792,7 @@ canvas {
   font-size: 9px;
   letter-spacing: 0.1em;
   text-transform: uppercase;
-  color: var(--hb-lit-dim);
+  color: var(--bn-label-void);
 }
 .bn-meta .bn-v {
   font-family: var(--hb-readout);

@@ -74,7 +74,7 @@ export type WindowKind = 'hann' | 'hamming' | 'blackman' | 'rect'
 export function makeWindow(size: number, kind: WindowKind): Float32Array {
   const w = new Float32Array(size)
   for (let i = 0; i < size; i++) {
-    const x = (2 * Math.PI * i) / (size - 1)
+    const x = (2 * Math.PI * i) / size
     switch (kind) {
       case 'hann':
         w[i] = 0.5 - 0.5 * Math.cos(x)
@@ -94,6 +94,18 @@ export function makeWindow(size: number, kind: WindowKind): Float32Array {
 }
 
 /**
+ * Coherent gain of a window, the sum a full scale tone is scaled by. Dividing
+ * the transform by it makes that tone read at its own amplitude. The window's
+ * noise bandwidth still holds the noise floor below its true level, so the
+ * trace reads tone amplitudes only.
+ */
+function windowGain(w: Float32Array): number {
+  let sum = 0
+  for (let i = 0; i < w.length; i++) sum += w[i]
+  return sum || 1
+}
+
+/**
  * Turns interleaved IQ into a dB spectrum, fftshifted so DC sits in the middle
  * the way every spectrum display expects.
  */
@@ -103,12 +115,14 @@ export class SpectrumAnalyzer {
   private re: Float32Array
   private im: Float32Array
   private out: Float32Array
+  private winGain: number
   readonly size: number
 
   constructor(size = 2048, window: WindowKind = 'hann') {
     this.size = size
     this.fft = new Fft(size)
     this.win = makeWindow(size, window)
+    this.winGain = windowGain(this.win)
     this.re = new Float32Array(size)
     this.im = new Float32Array(size)
     this.out = new Float32Array(size)
@@ -116,6 +130,7 @@ export class SpectrumAnalyzer {
 
   setWindow(kind: WindowKind): void {
     this.win = makeWindow(this.size, kind)
+    this.winGain = windowGain(this.win)
   }
 
   /**
@@ -134,7 +149,7 @@ export class SpectrumAnalyzer {
     this.fft.transform(this.re, this.im)
 
     const half = n >> 1
-    const scale = 1 / n
+    const scale = 1 / this.winGain
     for (let i = 0; i < n; i++) {
       // fftshift: the second half of the transform is the negative frequencies
       // and belongs on the left of the display.

@@ -57,6 +57,12 @@ export function useTranscription(deviceId: string) {
       await t.load((p) => {
         progress.value = Math.round(p.progress)
       })
+      // load resolves whether or not the model arrived, so the state it left
+      // behind is the only report of a failed download.
+      if (!t.loaded) {
+        error.value = t.lastError ?? 'the speech model did not load'
+        return
+      }
       t.on('text', (r) => {
         const line: TranscriptLine = { text: r.text, at: r.at }
         if (tagRange.value) {

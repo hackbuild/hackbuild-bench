@@ -1,8 +1,8 @@
 /**
- * RTL-SDR driver: RTL2832U demodulator with an R820T or R828D tuner.
+ * RTL-SDR driver: RTL2832U demodulator with an R820T tuner.
  *
- * Receive only. The dongle has no transmitter, so the only consequential thing
- * on it is the bias tee, which pushes dc up the coax.
+ * Receive only. The dongle has no transmitter. Its bias tee gpio survives across
+ * sessions and across other host applications, so reset clears it.
  */
 
 import { CAPABILITIES } from '@/core/capabilities'
@@ -28,6 +28,11 @@ const FFT_SIZE = 2048
 
 /** Above this the gain slider means let the tuner decide. */
 const GAIN_AUTO_AT = 49
+
+/** A transfer lands within milliseconds at every rate on offer, so this is dead. */
+const STREAM_STALL_MS = 3000
+
+const STALL_POLL_MS = 1000
 
 const USB_FILTERS: USBDeviceFilter[] = RTL_VENDORS.map((vendorId) => ({ vendorId }))
 
@@ -94,8 +99,8 @@ class RtlSdr {
   ppm = 0
   rate = 0
   freq = 100000000
-  /** 0 is tuner path, 2 is direct sampling on the q branch. */
-  direct = 0
+  /** False when the pll did not report lock at the last tune. */
+  tunerLocked = true
 
   constructor(port: UsbPort) {
     this.port = port
@@ -113,21 +118,30 @@ class RtlSdr {
     await com.writeEach(INIT_OPS)
 
     await com.i2cOpen()
-    const found = await R820T.detect(com)
-    if (!found) {
-      await com.i2cClose()
-      throw new Error('no r820t or r828d tuner on this dongle, only that family is supported')
+    try {
+      const found = await R820T.detect(com)
+      if (!found) {
+        throw new Error(
+          'this dongle has no r820t tuner. r828d boards, including the rtl-sdr blog v4, are not supported yet.',
+        )
+      }
+      this.tuner = new R820T(com, this.correctedXtal())
+      this.tunerName = 'r820t'
+      await com.writeEach([
+        ['demod', 1, 0xb1, 0x1a, 1],
+        ['demod', 0, 0x08, 0x4d, 1],
+      ])
+      await this.setIfFreq(IF_FREQ)
+      await com.writeDemod(1, 0x15, 0x01, 1)
+      await this.tuner.init()
+    } finally {
+      try {
+        await com.i2cClose()
+      } catch {
+        // on an unplugged device the gate close fails too, and the tuner
+        // failure is the one the caller needs.
+      }
     }
-    this.tuner = new R820T(com, this.correctedXtal())
-    this.tunerName = 'r820t'
-    await com.writeEach([
-      ['demod', 1, 0xb1, 0x1a, 1],
-      ['demod', 0, 0x08, 0x4d, 1],
-    ])
-    await this.setIfFreq(IF_FREQ)
-    await com.writeDemod(1, 0x15, 0x01, 1)
-    await this.tuner.init()
-    await com.i2cClose()
   }
 
   async setIfFreq(hz: number): Promise<void> {
@@ -162,15 +176,15 @@ class RtlSdr {
 
   /** The tuner is parked IF_FREQ above, since the demod shifts it back down. */
   async setCenterFrequency(hz: number): Promise<number> {
-    if (this.direct) {
-      await this.setIfFreq(hz)
-      this.freq = hz
-      return hz
-    }
     if (!this.tuner) throw new Error('tuner is not initialised')
     await this.com.i2cOpen()
-    const actual = await this.tuner.setFrequency(hz + IF_FREQ)
-    await this.com.i2cClose()
+    let actual: number | null
+    try {
+      actual = await this.tuner.setFrequency(hz + IF_FREQ)
+    } finally {
+      await this.com.i2cClose()
+    }
+    this.tunerLocked = this.tuner.pllLock
     this.freq = actual === null ? hz : actual - IF_FREQ
     return this.freq
   }
@@ -178,9 +192,12 @@ class RtlSdr {
   async setGain(db: number | null): Promise<void> {
     if (!this.tuner) throw new Error('tuner is not initialised')
     await this.com.i2cOpen()
-    if (db === null) await this.tuner.setAutoGain()
-    else await this.tuner.setManualGain(db)
-    await this.com.i2cClose()
+    try {
+      if (db === null) await this.tuner.setAutoGain()
+      else await this.tuner.setManualGain(db)
+    } finally {
+      await this.com.i2cClose()
+    }
   }
 
   async setDigitalAgc(on: boolean): Promise<void> {
@@ -190,7 +207,7 @@ class RtlSdr {
   async setPpm(ppm: number): Promise<void> {
     this.ppm = ppm
     this.tuner?.setXtal(this.correctedXtal())
-    if (!this.direct) await this.setIfFreq(IF_FREQ)
+    await this.setIfFreq(IF_FREQ)
     await this.setSampleRate(this.rate)
     await this.setCenterFrequency(this.freq)
   }
@@ -215,41 +232,6 @@ class RtlSdr {
     await this.setGpioBit(0, on)
   }
 
-  async setDirectSampling(mode: number): Promise<void> {
-    const com = this.com
-    if (mode) {
-      await com.i2cOpen()
-      try {
-        await this.tuner?.shutdown()
-      } catch {
-        // the tuner is being bypassed anyway, a failed shutdown does not block it.
-      }
-      await com.i2cClose()
-      await com.writeEach([
-        ['demod', 1, 0xb1, 0x1a, 1],
-        ['demod', 1, 0x15, 0x00, 1],
-        ['demod', 0, 0x08, 0x4d, 1],
-        // q branch adc input.
-        ['demod', 0, 0x06, 0x90, 1],
-      ])
-      this.direct = 2
-    } else {
-      this.direct = 0
-      await com.i2cOpen()
-      await this.tuner?.init()
-      await com.i2cClose()
-      await com.writeEach([
-        ['demod', 1, 0xb1, 0x1a, 1],
-        ['demod', 0, 0x08, 0x4d, 1],
-      ])
-      await this.setIfFreq(IF_FREQ)
-      await com.writeEach([
-        ['demod', 1, 0x15, 0x01, 1],
-        ['demod', 0, 0x06, 0x80, 1],
-      ])
-    }
-  }
-
   async resetBuffer(): Promise<void> {
     await this.com.writeEach([
       ['reg', BLOCK.USB, REG.EPA_CTL, 0x0210, 2],
@@ -257,13 +239,23 @@ class RtlSdr {
     ])
   }
 
+  /** The i2c gate and the demod power state outlive the port, so both are cleared here. */
   async close(): Promise<void> {
-    try {
-      if (this.tuner && !this.direct) {
+    if (this.tuner) {
+      try {
         await this.com.i2cOpen()
-        await this.tuner.shutdown()
-        await this.com.i2cClose()
+        try {
+          await this.tuner.shutdown()
+        } finally {
+          await this.com.i2cClose()
+        }
+      } catch {
+        // already unplugged. the rest of the teardown is still worth attempting.
       }
+    }
+    try {
+      // 0x20 powers the demodulator and the adcs down, undoing the 0xe8 in INIT_OPS.
+      await this.com.writeReg(BLOCK.SYS, REG.DEMOD_CTL, 0x20, 1)
     } catch {
       // already unplugged. releasing the interface is still worth attempting.
     }
@@ -275,22 +267,20 @@ class RtlSdr {
 // session
 // ---------------------------------------------------------------------------
 
-export interface RtlSdrSession extends DeviceSession {
-  /** Pushes dc up the coax to feed an inline amplifier. */
-  setBiasTee(on: boolean): Promise<void>
-  /** 0 is the tuner path, non zero bypasses the tuner onto the q branch adc. */
-  setDirectSampling(mode: number): Promise<void>
-}
-
-class RtlSession implements RtlSdrSession {
+class RtlSession implements DeviceSession {
   private sdr: RtlSdr
   private ctx: DriverContext
   private info: Record<string, string>
   private analyzer = new SpectrumAnalyzer(FFT_SIZE)
   private lastFft = 0
-  private dropped = 0
   private pumping: Promise<void> | null = null
+  /** Held past a stream failure so teardown still waits for the transfers to unwind. */
+  private pending: Promise<void> | null = null
   private abort: AbortController | null = null
+  private lastChunk = 0
+  private stallMisses = 0
+  private watchdog: ReturnType<typeof setInterval> | null = null
+  private streamFailed = false
   /** Control transfers must not interleave, i2c least of all. */
   private queue: Promise<unknown> = Promise.resolve()
   private applied: Record<string, number> = {}
@@ -324,8 +314,8 @@ class RtlSession implements RtlSdrSession {
   async configure(params: Record<string, number>): Promise<void> {
     await this.serial(async () => {
       if (params.ppm !== undefined && params.ppm !== this.applied.ppm) {
-        this.applied.ppm = params.ppm
         await this.sdr.setPpm(params.ppm)
+        this.applied.ppm = params.ppm
         this.applied.sampleRate = this.sdr.rate
         this.applied.centerHz = this.sdr.freq
       }
@@ -336,12 +326,17 @@ class RtlSession implements RtlSdrSession {
         this.ctx.setInfo({ sampleRate: this.info.sampleRate })
       }
       if (params.centerHz !== undefined && params.centerHz !== this.applied.centerHz) {
-        this.applied.centerHz = params.centerHz
         await this.sdr.setCenterFrequency(params.centerHz)
+        this.applied.centerHz = params.centerHz
+        this.info.pll = this.sdr.tunerLocked ? 'locked' : 'no lock'
+        this.ctx.setInfo({ pll: this.info.pll })
+        if (!this.sdr.tunerLocked) {
+          this.ctx.log(`tuner pll did not lock at ${Math.round(params.centerHz)} hz`)
+        }
       }
       if (params.gain !== undefined && params.gain !== this.applied.gain) {
-        this.applied.gain = params.gain
         await this.sdr.setGain(params.gain >= GAIN_AUTO_AT ? null : params.gain)
+        this.applied.gain = params.gain
       }
     })
   }
@@ -361,27 +356,84 @@ class RtlSession implements RtlSdrSession {
       signal: abort.signal,
     })
 
+    const previous = this.pending
+    this.pending = null
+    if (previous) await previous.catch(() => undefined)
+
     await this.serial(() => this.sdr.resetBuffer())
-    this.dropped = 0
-    this.pumping = this.sdr.port.stream(
+    this.streamFailed = false
+    this.stallMisses = 0
+    this.lastChunk = performance.now()
+    const pumping = this.sdr.port.stream(
       IQ_ENDPOINT,
       XFER_BYTES,
       XFER_DEPTH,
       (chunk) => this.onChunk(chunk),
       abort.signal,
     )
-    void this.pumping.catch((err: unknown) => {
-      this.ctx.log(`usb read stopped: ${err instanceof Error ? err.message : String(err)}`)
-    })
+    this.pumping = pumping
+    this.pending = pumping
+    void pumping.then(
+      () => {
+        if (this.pumping !== pumping) return
+        this.clearWatchdog()
+        if (abort.signal.aborted) return
+        this.failStream('the usb read loop exited on its own')
+      },
+      (err: unknown) => {
+        if (this.pumping !== pumping) return
+        this.failStream(err instanceof Error ? err.message : String(err))
+      },
+    )
+    this.watchdog = setInterval(() => this.checkStall(), STALL_POLL_MS)
     this.ctx.log(`streaming iq at ${Math.round(this.sdr.rate)} sps`)
   }
 
-  async stop(): Promise<void> {
-    if (!this.abort) return
-    this.abort.abort()
+  /**
+   * The transport returns normally when the device closes under it, so a stream
+   * that ends without this session aborting is a failure.
+   */
+  private failStream(reason: string): void {
+    if (this.streamFailed || !this.pumping) return
+    this.streamFailed = true
+    this.clearWatchdog()
+    this.abort?.abort()
     this.abort = null
-    const pending = this.pumping
     this.pumping = null
+    this.ctx.log(`iq stream stopped: ${reason}`)
+  }
+
+  /**
+   * A frozen tab stops performance.now and the transfers together, so the first
+   * poll after it resumes reads as a stall on a live stream. Only a miss that
+   * repeats on the next poll is real.
+   */
+  private checkStall(): void {
+    if (!this.pumping) return
+    if (performance.now() - this.lastChunk < STREAM_STALL_MS) {
+      this.stallMisses = 0
+      return
+    }
+    this.stallMisses++
+    if (this.stallMisses < 2) return
+    this.failStream(`no usb transfer completed for ${STREAM_STALL_MS / 1000} seconds`)
+  }
+
+  private clearWatchdog(): void {
+    if (this.watchdog === null) return
+    clearInterval(this.watchdog)
+    this.watchdog = null
+  }
+
+  async stop(): Promise<void> {
+    this.clearWatchdog()
+    this.streamFailed = false
+    this.stallMisses = 0
+    this.abort?.abort()
+    this.abort = null
+    this.pumping = null
+    const pending = this.pending
+    this.pending = null
     if (pending) await pending.catch(() => undefined)
   }
 
@@ -400,35 +452,12 @@ class RtlSession implements RtlSdrSession {
   }
 
   async health(): Promise<boolean> {
-    return this.sdr.port.isOpen
-  }
-
-  async setBiasTee(on: boolean): Promise<void> {
-    if (on && !this.ctx.isArmed(CAPABILITIES.POWER_SOURCE)) {
-      throw new Error(
-        'the bias tee sends dc up the coax. arm power out first, and check the antenna or splitter on the port can take it.',
-      )
-    }
-    await this.serial(() => this.sdr.setBiasTee(on))
-    this.ctx.log(`bias tee ${on ? 'on' : 'off'}`)
-  }
-
-  async setDirectSampling(mode: number): Promise<void> {
-    await this.serial(async () => {
-      await this.sdr.setDirectSampling(mode)
-      if (!mode) {
-        await this.sdr.setCenterFrequency(this.sdr.freq)
-        await this.sdr.setGain(
-          (this.applied.gain ?? GAIN_AUTO_AT) >= GAIN_AUTO_AT ? null : this.applied.gain,
-        )
-      }
-    })
-    this.ctx.log(mode ? 'direct sampling on the q branch, hf only' : 'tuner path')
+    return this.sdr.port.isOpen && !this.streamFailed
   }
 
   /** 8 bit unsigned IQ pairs, offset binary around 127.5. */
   private onChunk(chunk: Uint8Array): void {
-    if (chunk.length < XFER_BYTES) this.dropped++
+    this.lastChunk = performance.now()
     const n = chunk.length & ~1
     if (n === 0) return
 
@@ -443,9 +472,10 @@ class RtlSession implements RtlSdrSession {
       samples,
       centerHz,
       sampleRate,
-      dropped: this.dropped,
+      // a short bulk transfer is not a lost sample, and an rtl2832u fifo
+      // overrun is not visible from here, so there is no honest count to give.
+      dropped: 0,
     }
-    this.dropped = 0
     this.ctx.emit(iq)
 
     const now = performance.now()
@@ -557,12 +587,17 @@ export const rtlsdrDriver: DeviceDriver = {
 
     const info: Record<string, string> = {
       tuner: sdr.tunerName,
+      pll: sdr.tunerLocked ? 'locked' : 'no lock',
       serial: port.serial || 'none reported',
       product: port.productName,
       sampleRate: `${Math.round(rate)} sps`,
     }
     ctx.setInfo(info)
-    ctx.log(`${sdr.tunerName} tuner ready at ${Math.round(center)} hz`)
+    ctx.log(
+      sdr.tunerLocked
+        ? `${sdr.tunerName} tuner ready at ${Math.round(center)} hz`
+        : `${sdr.tunerName} tuner pll did not lock at ${Math.round(center)} hz`,
+    )
 
     return new RtlSession(sdr, ctx, info, defaults)
   },

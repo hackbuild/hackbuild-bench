@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, ref } from 'vue'
+import { computed, onBeforeUnmount, ref, watch } from 'vue'
 import { HbButton, HbIcon, HbMark } from '@virgilvox/hackbuild-ui'
 import { useBench } from '@/stores/bench'
 import { useSessionLog } from '@/stores/sessionLog'
@@ -18,22 +18,39 @@ const recordLabel = computed(() =>
   session.recording ? `recording ${elapsed.value}` : 'record session',
 )
 
+function tick(): void {
+  const s = Math.floor((Date.now() - session.startedAt) / 1000)
+  elapsed.value = `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`
+}
+
 function toggleRecord(): void {
   session.toggle()
+  // jump to the log so it is obvious where the recording goes. this stays on
+  // the click so a recording started elsewhere does not move the view.
   if (session.recording) {
-    // jump to the log so it is obvious where the recording goes.
     devices.focus('sessionlog')
     bench.setView('focus')
-    timer = setInterval(() => {
-      const s = Math.floor((Date.now() - session.startedAt) / 1000)
-      elapsed.value = `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`
-    }, 500)
-  } else if (timer) {
-    clearInterval(timer)
-    timer = null
-    elapsed.value = '0:00'
   }
 }
+
+// the session log panel toggles recording too, so the timer follows the store
+// rather than this button.
+watch(
+  () => session.recording,
+  (on) => {
+    if (timer) {
+      clearInterval(timer)
+      timer = null
+    }
+    if (on) {
+      tick()
+      timer = setInterval(tick, 500)
+    } else {
+      elapsed.value = '0:00'
+    }
+  },
+  { immediate: true },
+)
 
 onBeforeUnmount(() => {
   if (timer) clearInterval(timer)

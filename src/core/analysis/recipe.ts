@@ -82,12 +82,28 @@ function toHexString(bytes: Uint8Array, delim: string, upper: boolean): string {
 }
 
 function fromHexString(text: string): Uint8Array {
-  const stripped = text.replace(/0[xX]([0-9a-fA-F]{2})/g, '$1').replace(/[^0-9a-fA-F]/g, '')
+  // whitespace, comma, colon, semicolon, underscore and dash all appear as byte
+  // separators in hex dumps and MAC addresses.
+  const body = text.replace(/0[xX]([0-9a-fA-F]{2})/g, '$1').replace(/[\s,:;_-]/g, '')
+  const stripped = body.replace(/[^0-9a-fA-F]/g, '')
   if (stripped.length === 0) throw new Error('no hex digits in the input')
+  const offenders = body.length - stripped.length
+  if (offenders > body.length * 0.1) {
+    const chars = distinctOutside(body, /[0-9a-fA-F]/)
+    throw new Error(`input is not hex, ${offenders} of ${body.length} characters are not hex digits: ${chars}`)
+  }
   if (stripped.length % 2 !== 0) throw new Error('hex input has an odd number of digits')
   const out = new Uint8Array(stripped.length / 2)
   for (let i = 0; i < out.length; i++) out[i] = parseInt(stripped.substr(i * 2, 2), 16)
   return out
+}
+
+/** The distinct characters in text that the keep pattern does not match, quoted. */
+function distinctOutside(text: string, keep: RegExp): string {
+  const seen = new Set<string>()
+  for (const ch of text) if (!keep.test(ch)) seen.add(ch)
+  const shown = [...seen].slice(0, 6).map((c) => JSON.stringify(c)).join(' ')
+  return seen.size > 6 ? `${shown} and ${seen.size - 6} more` : shown
 }
 
 const B64_ALPHA = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/'
@@ -614,8 +630,14 @@ export const OPERATIONS: Operation[] = [
     label: 'from binary',
     args: [],
     run: (input) => {
-      const bits = decodeLatin1(input).replace(/[^01]/g, '')
+      const body = decodeLatin1(input).replace(/[\s,]/g, '')
+      const bits = body.replace(/[^01]/g, '')
       if (bits.length < 8) throw new Error('fewer than eight binary digits in the input')
+      const offenders = body.length - bits.length
+      if (offenders > body.length * 0.1) {
+        const chars = distinctOutside(body, /[01]/)
+        throw new Error(`input is not binary, ${offenders} of ${body.length} characters are not 0 or 1: ${chars}`)
+      }
       const n = Math.floor(bits.length / 8)
       const out = new Uint8Array(n)
       for (let i = 0; i < n; i++) out[i] = parseInt(bits.substr(i * 8, 8), 2)
@@ -640,10 +662,16 @@ export const OPERATIONS: Operation[] = [
     label: 'from decimal',
     args: [],
     run: (input) => {
-      const parts = decodeLatin1(input)
-        .split(/[^0-9]+/)
-        .filter((p) => p !== '')
+      const text = decodeLatin1(input)
+      const parts = text.split(/[^0-9]+/).filter((p) => p !== '')
       if (parts.length === 0) throw new Error('no decimal values in the input')
+      // separators between numbers include list punctuation and array brackets.
+      const allowed = (text.match(/[0-9\s,;[\]()]/g) ?? []).length
+      const offenders = text.length - allowed
+      if (offenders > text.length * 0.1) {
+        const chars = distinctOutside(text, /[0-9\s,;[\]()]/)
+        throw new Error(`input is not decimal, ${offenders} of ${text.length} characters are not digits or separators: ${chars}`)
+      }
       const out = new Uint8Array(parts.length)
       for (let i = 0; i < parts.length; i++) {
         const v = Number(parts[i])

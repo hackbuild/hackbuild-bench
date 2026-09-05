@@ -113,7 +113,7 @@ export const ARM_NOTES: Partial<Record<Capability, string>> = {
   [CAPABILITIES.MESH_TX]:
     'this transmits on the mesh. messages are relayed by other nodes and are not private.',
   [CAPABILITIES.NET_ATTACK]:
-    'this moves the pineapple from listening to acting on nearby clients. use it on a network you run.',
+    'this moves a wifi device from listening to acting on nearby clients. use it on a network you run.',
   [CAPABILITIES.GPIO_DRIVE]:
     'this drives board pins as outputs. check nothing on the pin is already driving it the other way.',
 }

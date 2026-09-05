@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, ref } from 'vue'
+import { computed, onBeforeUnmount, ref, useId } from 'vue'
 import { HbButton, HbIcon } from '@virgilvox/hackbuild-ui'
 import InstTerminal from '@/components/instruments/InstTerminal.vue'
 import { useDevices } from '@/stores/devices'
@@ -18,6 +18,8 @@ const stream = useDeviceStream(props.deviceId)
 const node = computed(() => devices.nodes.find((n) => n.id === props.deviceId) ?? null)
 const streaming = computed(() => node.value?.status === 'streaming')
 const busy = ref(false)
+const sendError = ref<string | null>(null)
+const baudId = useId()
 
 const PACKS = [
   { id: 'raw', label: 'raw', icon: 'code' as const },
@@ -52,18 +54,40 @@ async function close(): Promise<void> {
 
 async function send(text: string): Promise<void> {
   const session = sessionFor()
-  if (!session) return
+  if (!session) {
+    sendError.value = 'no serial session, the device is not attached'
+    return
+  }
   const line = pack.value === 'at' && !text.toUpperCase().startsWith('AT') ? `AT${text}` : text
-  await session.write(`${line}\r\n`)
+  try {
+    await session.write(`${line}\r\n`)
+    sendError.value = null
+  } catch (err) {
+    sendError.value = `write failed, ${err instanceof Error ? err.message : String(err)}`
+  }
 }
 
 async function autoBaud(): Promise<void> {
   const session = sessionFor()
-  if (!session?.autoBaud) return
+  if (!session) {
+    sendError.value = 'no serial session, the device is not attached'
+    return
+  }
+  if (!session.autoBaud) {
+    sendError.value = 'this driver does not scan baud rates, pick one from the list'
+    return
+  }
   busy.value = true
   try {
     const found = await session.autoBaud()
-    if (found) baud.value = found
+    if (found) {
+      baud.value = found
+      sendError.value = null
+    } else {
+      sendError.value = 'auto baud found no rate that scored, set it by hand'
+    }
+  } catch (err) {
+    sendError.value = `auto baud failed, ${err instanceof Error ? err.message : String(err)}`
   } finally {
     busy.value = false
   }
@@ -101,8 +125,8 @@ onBeforeUnmount(() => {
 
     <div class="bn-knobs" style="margin-top: 0">
       <div class="bn-knob">
-        <span class="bn-klabel">baud</span>
-        <select v-model.number="baud">
+        <label class="bn-klabel" :for="baudId">baud</label>
+        <select :id="baudId" v-model.number="baud">
           <option v-for="b in BAUDS" :key="b" :value="b">{{ b }}</option>
         </select>
       </div>
@@ -133,6 +157,11 @@ onBeforeUnmount(() => {
       placeholder="type a command and press enter"
       @send="send"
     />
+
+    <div v-if="sendError" class="bn-banner is-err" role="alert">
+      <HbIcon name="warning" :size="16" />
+      <span>{{ sendError }}</span>
+    </div>
 
     <p v-if="bench.advanced" class="bn-note">
       auto baud samples each common rate for a moment and scores what comes back for

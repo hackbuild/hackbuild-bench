@@ -56,11 +56,16 @@ const REQ = {
 /** transceiver_mode_t in hackrf.h. */
 const MODE = { OFF: 0, RECEIVE: 1, TRANSMIT: 2 } as const
 
+/** hackrf_board_id in hackrf.h. Rev 9 is the board shipping now. */
 const BOARD_NAMES: Record<number, string> = {
   0: 'jellybean',
   1: 'jawbreaker',
   2: 'hackrf one',
   3: 'rad1o',
+  4: 'hackrf one r9',
+  5: 'praline',
+  0xfe: 'unrecognized',
+  0xff: 'undetected',
 }
 
 const EP_RX = 1
@@ -74,6 +79,15 @@ const TX_DEPTH = 4
 const TX_QUEUE_BYTES = TRANSFER_BYTES * 8
 /** A frame longer than this is refused rather than held in memory. */
 const TX_FRAME_LIMIT_SECONDS = 10
+/** The same ceiling in samples, so a high sample rate cannot turn a legal
+ *  duration into a buffer the tab has to hold. */
+const TX_FRAME_LIMIT_SAMPLES = 2000000 * TX_FRAME_LIMIT_SECONDS
+/** afskAudio prepends this many preamble bits by default. */
+const AFSK_PREAMBLE_BITS = 32
+/** Wall clock cap on the flush at the end of a transmission. */
+const TX_FLUSH_TIMEOUT_MS = 2000
+/** Wall clock cap on the mode change out of transmit. */
+const MODE_OFF_TIMEOUT_MS = 500
 const FFT_SIZE = 2048
 /**
  * Transfers dropped after a retune. They still carry the old frequency, and
@@ -85,12 +99,51 @@ const SWEEP_DISCARD = 3
 /** Publish spectrum at 20 fps whatever the sample rate feeds in. */
 const FFT_INTERVAL_MS = 50
 const AUDIO_RATE = 48000
+/** The level the sweep reports for a step the tuner has not reached yet. */
+const SWEEP_FLOOR_DB = -140
+/**
+ * How long a pass runs before the sweep starts publishing part of it. A narrow
+ * range finishes inside this and goes out whole, which keeps the floor the
+ * display picks off the steps that are actually filled. A range wide enough to
+ * take minutes paints as it goes rather than leaving the panel blank.
+ */
+const SWEEP_PARTIAL_AFTER_MS = 1000
+
+/**
+ * max2837_ft in libhackrf hackrf.c. The firmware rounds a request up to the
+ * first entry at or above it, and past the last entry it writes no register at
+ * all and the filter silently keeps whatever it had.
+ */
+const BASEBAND_FILTER_BW = [
+  1750000, 2500000, 3500000, 5000000, 5500000, 6000000, 7000000, 8000000, 9000000, 10000000,
+  12000000, 14000000, 15000000, 20000000, 24000000, 28000000,
+]
+
+/**
+ * The narrowest table entry at or above hz. The sweep keeps 75 percent of each
+ * window, so a filter narrower than the request would roll off inside the part
+ * that is stitched.
+ */
+function basebandFilterBw(hz: number): number {
+  const last = BASEBAND_FILTER_BW.length - 1
+  const want = clamp(hz, BASEBAND_FILTER_BW[0], BASEBAND_FILTER_BW[last])
+  let i = 0
+  while (i < last && BASEBAND_FILTER_BW[i] < want) i++
+  return BASEBAND_FILTER_BW[i]
+}
 
 const USB_FILTERS: USBDeviceFilter[] = [
   { vendorId: 0x1d50, productId: 0x6089 },
   { vendorId: 0x1d50, productId: 0x604b },
   { vendorId: 0x1d50, productId: 0xcc15 },
 ]
+
+/** The filters accept three boards, so the rail names the one that answered. */
+const PRODUCT_NAMES: Record<number, string> = {
+  0x6089: 'HackRF One',
+  0x604b: 'HackRF Jawbreaker',
+  0xcc15: 'rad1o',
+}
 
 const DEMODS: DemodMode[] = ['fm', 'nfm', 'am', 'usb', 'lsb']
 
@@ -200,9 +253,9 @@ export interface HackRfSession extends TransmitSession {
 class HackRfOneSession implements HackRfSession {
   private usb: UsbPort
   private ctx: DriverContext
-  // straight off the descriptor, so the knobs the panel shows and the values
-  // the radio runs on cannot drift apart. sweepLowHz and sweepHighHz matter
-  // here: missing, the sweep silently ran 1 MHz to 6 GHz.
+  // seeded straight off the descriptor, so the knobs the panel shows and the
+  // values the radio runs on cannot drift apart. every key the sweep reads,
+  // sweepLowHz and sweepHighHz included, has to exist in the descriptor.
   private params: Record<string, number> = Object.fromEntries(
     hackrfDescriptor.params.map((p) => [p.key, p.default]),
   )
@@ -221,6 +274,13 @@ class HackRfOneSession implements HackRfSession {
   private txQueued = 0
   private txRoom: Array<() => void> = []
   private txIdle: Array<() => void> = []
+  private txClosing = false
+  private txClosingPromise: Promise<void> | null = null
+  private txRestore: Record<string, number> | null = null
+  /** True while a mode change the radio has not acknowledged is still in the
+   *  device queue. Webusb serialises control transfers, so anything sent now
+   *  waits behind it. */
+  private controlStalled = false
 
   constructor(usb: UsbPort, ctx: DriverContext) {
     this.usb = usb
@@ -248,7 +308,7 @@ class HackRfOneSession implements HackRfSession {
     // second word is the divider, the rate is set as a fraction.
     dv.setUint32(4, 1, true)
     await this.usb.controlOut(REQ.SAMPLE_RATE_SET, 0, 0, b)
-    const bw = Math.floor(0.75 * sps)
+    const bw = basebandFilterBw(0.75 * sps)
     await this.usb.controlOut(
       REQ.BASEBAND_FILTER_BANDWIDTH_SET,
       bw & 0xffff,
@@ -278,6 +338,37 @@ class HackRfOneSession implements HackRfSession {
 
   private async setTransceiverMode(mode: number): Promise<void> {
     await this.usb.controlOut(REQ.SET_TRANSCEIVER_MODE, mode, 0)
+  }
+
+  /**
+   * The firmware withholds the acknowledgement for the mode change out of
+   * transmit until the m0 has sent everything the host queued, and a webusb
+   * control transfer carries no timeout of its own. Webusb serialises control
+   * transfers on the device, so waiting forever wedges every later one.
+   */
+  private async modeOff(): Promise<void> {
+    let failure: unknown
+    const done = this.setTransceiverMode(MODE.OFF).then(
+      () => 'ok' as const,
+      (err: unknown) => {
+        failure = err
+        return 'failed' as const
+      },
+    )
+    void done.then(() => {
+      this.controlStalled = false
+    })
+    let timer: ReturnType<typeof setTimeout> | undefined
+    const expired = new Promise<'expired'>((resolve) => {
+      timer = setTimeout(() => resolve('expired'), MODE_OFF_TIMEOUT_MS)
+    })
+    const which = await Promise.race([done, expired])
+    clearTimeout(timer)
+    if (which === 'failed') throw failure
+    if (which === 'expired') {
+      this.controlStalled = true
+      this.ctx.log(`the radio did not acknowledge transmit off within ${MODE_OFF_TIMEOUT_MS} ms`)
+    }
   }
 
   async init(): Promise<void> {
@@ -362,6 +453,9 @@ class HackRfOneSession implements HackRfSession {
   }
 
   async configure(params: Record<string, number>): Promise<void> {
+    // a tune through the normal path is where the user wants the radio, so the
+    // snapshot transmit would put back is dropped.
+    this.txRestore = null
     this.params = { ...this.params, ...params }
     await this.applyRadio(false)
     // transmit gain only reaches the hardware once transmit is armed and running.
@@ -432,7 +526,7 @@ class HackRfOneSession implements HackRfSession {
   }
 
   async stop(): Promise<void> {
-    if (this.txActive) await this.endTransmit()
+    if (this.txActive || this.txPump) await this.endTransmit()
     if (!this.abort) return
     this.abort.abort()
     this.abort = null
@@ -445,17 +539,41 @@ class HackRfOneSession implements HackRfSession {
 
   async resetToSafeState(): Promise<void> {
     await this.stop()
-    try {
-      await this.setAmp(false)
-      await this.setTxVga(0)
-      await this.setTransceiverMode(MODE.OFF)
-      this.applied.amp = 0
-      this.applied.txvga = 0
-      this.params.amp = 0
-      this.params.txvga = 0
-    } catch {
-      // nothing left to quiet down when the device is gone.
+    // quietest first, and every step runs even when the one before it failed.
+    // this is the path whose whole job is to leave the radio silent.
+    const steps: Array<[string, () => Promise<void>]> = [
+      ['transceiver mode off', () => this.modeOff()],
+      [
+        'the front end amp off',
+        async () => {
+          await this.setAmp(false)
+          this.applied.amp = 0
+        },
+      ],
+      [
+        'transmit gain to zero',
+        async () => {
+          await this.setTxVga(0)
+          this.applied.txvga = 0
+        },
+      ],
+    ]
+    for (const [what, run] of steps) {
+      if (this.controlStalled) {
+        this.ctx.log(`the radio is still holding a control transfer, the reset stopped before ${what}`)
+        break
+      }
+      try {
+        await run()
+      } catch (err) {
+        const why = err instanceof Error ? err.message : String(err)
+        this.ctx.log(`the radio would not take ${what}: ${why}`)
+      }
     }
+    // applied is left alone where a step failed, so the next configure sends it
+    // again.
+    this.params.amp = 0
+    this.params.txvga = 0
   }
 
   async close(): Promise<void> {
@@ -511,9 +629,14 @@ class HackRfOneSession implements HackRfSession {
     const steps = Math.max(1, Math.ceil((highHz - lowHz) / usable))
     const spanHz = steps * usable
     const scratch = new Float32Array(FFT_SIZE * 2)
+    const panorama = new Float32Array(steps * segBins)
+    let lastEmitAt = 0
 
     while (!signal.aborted && this.usb.isOpen) {
-      const panorama = new Float32Array(steps * segBins)
+      // the steps the tuner has not reached yet read as floor, so a frame
+      // published mid pass still covers the span it says it covers.
+      panorama.fill(SWEEP_FLOOR_DB)
+      const passStart = performance.now()
       let filled = 0
       for (let step = 0; step < steps && !signal.aborted; step++) {
         const center = lowHz + usable * (step + 0.5)
@@ -544,20 +667,35 @@ class HackRfOneSession implements HackRfSession {
         const bins = this.analyzer.process(scratch)
         panorama.set(bins.subarray(edge, edge + segBins), filled)
         filled += segBins
+        const now = performance.now()
+        if (now - passStart >= SWEEP_PARTIAL_AFTER_MS && now - lastEmitAt >= FFT_INTERVAL_MS) {
+          lastEmitAt = now
+          this.emitPanorama(panorama, lowHz, spanHz)
+        }
       }
       if (signal.aborted) return
       if (filled === 0) {
         this.ctx.log('sweep produced nothing, stopping')
         return
       }
-      const frame: Emitted<FftFrame> = {
-        kind: 'fft',
-        bins: filled === panorama.length ? panorama : panorama.subarray(0, filled),
-        centerHz: lowHz + spanHz / 2,
-        sampleRate: spanHz,
-      }
-      this.ctx.emit(frame)
+      lastEmitAt = performance.now()
+      this.emitPanorama(panorama, lowHz, spanHz)
     }
+  }
+
+  /**
+   * The sweep refills one buffer for the whole session, and the panels compare
+   * frames by identity and hold what they are handed, so each publish carries
+   * its own copy.
+   */
+  private emitPanorama(panorama: Float32Array, lowHz: number, spanHz: number): void {
+    const frame: Emitted<FftFrame> = {
+      kind: 'fft',
+      bins: panorama.slice(),
+      centerHz: lowHz + spanHz / 2,
+      sampleRate: spanHz,
+    }
+    this.ctx.emit(frame)
   }
 
   private onSamples(chunk: Uint8Array, demod: DemodMode | null): void {
@@ -633,6 +771,11 @@ class HackRfOneSession implements HackRfSession {
     }
     if (params.txvga !== undefined) next.txvga = clamp(params.txvga, 0, 47)
     if (params.amp !== undefined) next.amp = params.amp >= 1 ? 1 : 0
+    // the bus holds its own copy of the params and there is no hook to tell it
+    // these, so the settings the panels are showing are put back afterwards.
+    if (!this.txRestore) {
+      this.txRestore = { centerHz: this.params.centerHz, sampleRate: this.params.sampleRate }
+    }
     this.params = { ...this.params, ...next }
     await this.applyRadio(false)
     if (next.txvga !== undefined) {
@@ -663,8 +806,36 @@ class HackRfOneSession implements HackRfSession {
     this.txPump = this.pumpTx(abort.signal)
   }
 
+  /**
+   * Ends transmit once the queue has actually reached the radio. A caller
+   * returns from its last write as soon as the samples are queued, with the
+   * pump still to send them, so cutting it there truncates the transmission.
+   */
   async endTransmit(): Promise<void> {
-    if (!this.txActive) return
+    if (this.txClosingPromise) return this.txClosingPromise
+    if (!this.txActive && !this.txPump) return
+    const run = this.runEndTransmit()
+    this.txClosingPromise = run
+    try {
+      await run
+    } finally {
+      this.txClosingPromise = null
+    }
+  }
+
+  private async runEndTransmit(): Promise<void> {
+    if (this.txActive) {
+      // producers stop adding while the queue drains. the carrier loop would
+      // otherwise refill it for as long as the flush waits.
+      this.txClosing = true
+      this.wake(this.txRoom)
+      try {
+        await this.flushTx()
+      } finally {
+        this.txClosing = false
+      }
+    }
+
     this.txActive = false
     this.txChunks = []
     this.txQueued = 0
@@ -681,13 +852,27 @@ class HackRfOneSession implements HackRfSession {
     if (pump) await pump
 
     try {
-      await this.setTransceiverMode(MODE.OFF)
+      await this.modeOff()
       // the amplifier goes off between transmissions. a send turns it back on.
-      await this.setAmp(false)
-      this.applied.amp = 0
+      if (!this.controlStalled) {
+        await this.setAmp(false)
+        this.applied.amp = 0
+      }
       this.params.amp = 0
     } catch {
       // nothing left to quiet down when the device is gone.
+    }
+
+    const restore = this.txRestore
+    this.txRestore = null
+    if (!restore) return
+    this.params = { ...this.params, ...restore }
+    // applied keeps the transmit values, so the next configure resends these.
+    if (this.controlStalled) return
+    try {
+      await this.applyRadio(false)
+    } catch {
+      // the next configure resends whatever did not land.
     }
   }
 
@@ -709,7 +894,6 @@ class HackRfOneSession implements HackRfSession {
     await this.queue(this.toInt8(iq))
 
     if (opened) {
-      await this.drainTx()
       await this.endTransmit()
     }
   }
@@ -721,10 +905,17 @@ class HackRfOneSession implements HackRfSession {
     const rate = this.params.sampleRate
     const keying = opts.mode ?? 'ook'
     const bitRate = clamp(Math.round(opts.bitRate ?? 2000), 50, 200000)
-    const seconds = (bytes.length * 8 + 32) / bitRate
+    const bits = bytes.length * 8 + (keying === 'afsk' ? AFSK_PREAMBLE_BITS : 0)
+    const seconds = bits / bitRate
     if (seconds > TX_FRAME_LIMIT_SECONDS) {
       throw new Error(
         `that frame runs ${seconds.toFixed(1)} s at ${bitRate} bits per second, past the ${TX_FRAME_LIMIT_SECONDS} s ceiling. shorten it or raise the rate.`,
+      )
+    }
+    const frames = Math.round(seconds * rate)
+    if (frames > TX_FRAME_LIMIT_SAMPLES) {
+      throw new Error(
+        `that frame is ${(frames / 1e6).toFixed(1)}M samples at ${(rate / 1e6).toFixed(1)} Msps, past the ceiling. shorten it, raise the bit rate, or drop the sample rate.`,
       )
     }
 
@@ -752,20 +943,53 @@ class HackRfOneSession implements HackRfSession {
   /** Split into transfer sized pieces and wait when the queue is full. */
   private async queue(buf: Int8Array<ArrayBuffer>): Promise<void> {
     for (let off = 0; off < buf.length; off += TRANSFER_BYTES) {
-      while (this.txActive && this.txQueued >= TX_QUEUE_BYTES) {
+      while (this.txActive && !this.txClosing && this.txQueued >= TX_QUEUE_BYTES) {
         await new Promise<void>((resolve) => this.txRoom.push(resolve))
       }
-      if (!this.txActive) return
+      if (!this.txActive || this.txClosing) return
       const piece = buf.subarray(off, Math.min(off + TRANSFER_BYTES, buf.length))
       this.txChunks.push(piece)
       this.txQueued += piece.length
     }
   }
 
-  private async drainTx(): Promise<void> {
+  private async drainTx(deadline: number): Promise<void> {
     while (this.txActive && this.txQueued > 0) {
-      await new Promise<void>((resolve) => this.txIdle.push(resolve))
+      const left = deadline - performance.now()
+      if (left <= 0) return
+      await this.waitFor(this.txIdle, left)
     }
+  }
+
+  /**
+   * Waits for the queue to reach the radio, then sends one block of zeros so
+   * the last real samples are pushed clear of the device's own fifo. Capped on
+   * the wall clock so an unresponsive radio cannot hold the panel.
+   */
+  private async flushTx(): Promise<void> {
+    const deadline = performance.now() + TX_FLUSH_TIMEOUT_MS
+    await this.drainTx(deadline)
+    if (!this.txActive) return
+    const tail = new Int8Array(TRANSFER_BYTES)
+    this.txChunks.push(tail)
+    this.txQueued += tail.length
+    await this.drainTx(deadline)
+  }
+
+  /** Resolves on the next wake or when the wait runs out, whichever is first. */
+  private waitFor(waiters: Array<() => void>, ms: number): Promise<void> {
+    return new Promise<void>((resolve) => {
+      let timer: ReturnType<typeof setTimeout> | undefined
+      let done = false
+      const finish = (): void => {
+        if (done) return
+        done = true
+        clearTimeout(timer)
+        resolve()
+      }
+      timer = setTimeout(finish, ms)
+      waiters.push(finish)
+    })
   }
 
   private wake(waiters: Array<() => void>): void {
@@ -782,13 +1006,15 @@ class HackRfOneSession implements HackRfSession {
     const silence = new Int8Array(TRANSFER_BYTES)
     const pending = new Set<Promise<void>>()
     let faults = 0
+    let lastError = ''
 
     const send = async (buf: Int8Array<ArrayBuffer>): Promise<void> => {
       try {
         await this.usb.bulkOut(EP_TX, buf)
         faults = 0
-      } catch {
+      } catch (err) {
         faults++
+        lastError = err instanceof Error ? err.message : String(err)
       }
     }
 
@@ -809,6 +1035,27 @@ class HackRfOneSession implements HackRfSession {
     }
 
     await Promise.allSettled([...pending])
+    if (signal.aborted) return
+
+    // the pump is the only thing that wakes a blocked producer, so an exit it
+    // was not asked for has to release them and say why, and quiet the radio
+    // that is still in transmit.
+    this.txActive = false
+    this.txChunks = []
+    this.txQueued = 0
+    this.wake(this.txRoom)
+    this.wake(this.txIdle)
+    this.ctx.log(`transmit stopped: ${lastError || 'the radio closed the usb endpoint'}`)
+    try {
+      await this.modeOff()
+      if (!this.controlStalled) {
+        await this.setAmp(false)
+        this.applied.amp = 0
+      }
+      this.params.amp = 0
+    } catch {
+      // nothing left to quiet down when the device is gone.
+    }
   }
 
   /**
@@ -821,7 +1068,7 @@ class HackRfOneSession implements HackRfSession {
       block[i] = 96
       block[i + 1] = 0
     }
-    while (this.txActive) {
+    while (this.txActive && !this.txClosing) {
       await this.queue(block)
     }
   }
@@ -832,7 +1079,7 @@ function handleFor(port: UsbPort): DeviceHandle {
     kind: 'hackrf',
     transport: 'webusb',
     uid: port.serial || port.productName,
-    label: 'HackRF One',
+    label: PRODUCT_NAMES[port.productId] ?? port.productName,
     raw: port,
   }
 }

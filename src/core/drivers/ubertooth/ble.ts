@@ -89,6 +89,8 @@ export interface Advertisement {
   /** Link layer bytes actually covered by the header length. */
   frame: Uint8Array
   advertiser?: string
+  /** TargetA for a directed advertisement. */
+  target?: string
   ads: AdStructure[]
   name?: string
   flags?: number
@@ -224,11 +226,18 @@ export function parseAdvertisement(bytes: Uint8Array): Advertisement | null {
   }
 
   const pl = bytes.subarray(6, end)
-  // SCAN_REQ and CONNECT_IND carry the initiator address first, then AdvA.
-  // Every other advertising PDU opens with AdvA and its AD structures.
   if (pduRaw === 3 || pduRaw === 5) {
+    // SCAN_REQ and CONNECT_IND carry the initiator address first, then AdvA.
     if (pl.length >= 12) adv.advertiser = macFromLe(pl.subarray(6, 12))
-  } else if (pl.length >= 6) {
+  } else if (pduRaw === 1) {
+    // ADV_DIRECT_IND is AdvA then TargetA, with no AD structures.
+    if (pl.length >= 6) adv.advertiser = macFromLe(pl.subarray(0, 6))
+    if (pl.length >= 12) adv.target = macFromLe(pl.subarray(6, 12))
+  } else if (pduRaw === 7 || pduRaw === 8) {
+    // ADV_EXT_IND and AUX_CONNECT_RSP open with an extended header whose flags
+    // position the address, so neither AdvA nor AD structures sit at a fixed
+    // offset and nothing is decoded from the payload.
+  } else if ((pduRaw === 0 || pduRaw === 2 || pduRaw === 4 || pduRaw === 6) && pl.length >= 6) {
     adv.advertiser = macFromLe(pl.subarray(0, 6))
     adv.ads = parseAdStructures(pl.subarray(6))
   }
@@ -251,5 +260,6 @@ export function parseAdvertisement(bytes: Uint8Array): Advertisement | null {
 
   const tail = adv.name ?? adv.manufacturer?.company ?? adv.advertiser ?? ''
   adv.summary = tail ? `${adv.pduType}  ${tail}` : adv.pduType
+  if (pduRaw === 7 || pduRaw === 8) adv.summary = `${adv.pduType}  extended header not decoded`
   return adv
 }

@@ -77,7 +77,7 @@ const descriptor: DeviceDescriptor = {
     title: 'what is a conduyt board',
     body: [
       'conduyt is a small piece of free firmware you flash onto a maker board, an arduino, an esp32, a raspberry pi pico, and so on. once it is running, the board becomes a general purpose instrument this bench can drive: read a sensor, flip a pin, fade an led, turn a servo, scan an i2c bus, all from here.',
-      'the point is that a cheap board fills in for gear you do not have. no serial cable? the board is your serial bridge. no logic tool? the board reads your pins. you wire up what you need and the bench talks to it.',
+      'a cheap board fills in for gear you do not have. no logic tool? the board reads your pins. no signal generator? it fades an led or turns a servo. no i2c scanner? it walks the bus. you wire up what you need and the bench talks to it.',
       'you flash the firmware once, in your browser, on the conduyt playground. pick your board, click flash, done. then come back here, plug the board in, and hit connect.',
     ],
     link: { label: 'flash a board at conduyt.io/playground', href: 'https://conduyt.io/playground' },

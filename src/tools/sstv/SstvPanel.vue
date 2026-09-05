@@ -184,14 +184,14 @@ onBeforeUnmount(() => {
     </div>
 
     <div class="bn-img is-capped" style="margin-top: 10px">
-      <canvas ref="canvas" width="320" height="256" aria-label="decoded sstv frame" />
+      <canvas ref="canvas" width="320" height="256" role="img" aria-label="decoded sstv frame" />
       <span class="bn-imgtag">{{ complete ? 'complete' : 'building' }}</span>
     </div>
 
     <p v-if="!hasFrame" class="bn-note">
-      nothing decoded yet. sstv sends one line at a time, so a picture takes 36 seconds on
-      robot 36 and near two minutes on martin m1. a weak or off frequency signal comes out
-      slanted or torn rather than not at all.
+      nothing decoded yet. sstv sends one line at a time, so a real transmission takes 36
+      seconds on robot 36 and near two minutes on martin m1. a weak or off frequency signal
+      comes out slanted or torn rather than not at all.
     </p>
 
     <div class="bn-hint">
@@ -201,6 +201,16 @@ onBeforeUnmount(() => {
         ham sstv sits at 14.230 and 14.233 MHz on usb, and 144.500 MHz fm on 2 metres. tune
         so the tones land in the middle of the passband, then start the decoder. the pictures
         run in bursts, mostly on weekends and during activity events.
+      </div>
+    </div>
+
+    <div v-if="audio.isSim.value" class="bn-hint">
+      <HbIcon name="flask" :size="15" />
+      <div>
+        <b>demo</b>
+        this device is simulated, so the panel synthesises the sstv tones and runs them through
+        the same decoder. it plays at eight times real time, which is why the picture finishes
+        in seconds.
       </div>
     </div>
   </div>

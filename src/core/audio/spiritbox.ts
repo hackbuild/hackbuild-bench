@@ -111,8 +111,6 @@ export interface SpiritBoxConfig {
   dwellMs: number
   /** Seconds of audio grouped into one reported window. */
   windowSec: number
-  /** Milliseconds of audio to blank over the retune click. */
-  blankMs: number
 }
 
 export interface SpiritBoxHooks {
@@ -129,7 +127,6 @@ const DEFAULTS: Omit<SpiritBoxConfig, 'band' | 'startHz' | 'stopHz' | 'stepHz'> 
   direction: 'up',
   dwellMs: 120,
   windowSec: 4,
-  blankMs: 8,
 }
 
 export class SpiritBox {
@@ -141,7 +138,6 @@ export class SpiritBox {
   private sign = 1
   private hopCount = 0
   private passCount = 0
-  private blankRemainingMs = 0
 
   private windowIndex = 0
   private windowStart = 0
@@ -160,7 +156,6 @@ export class SpiritBox {
       direction: opts.direction ?? DEFAULTS.direction,
       dwellMs: opts.dwellMs ?? DEFAULTS.dwellMs,
       windowSec: opts.windowSec ?? DEFAULTS.windowSec,
-      blankMs: opts.blankMs ?? DEFAULTS.blankMs,
     }
     this.hooks = {
       tune: opts.tune,
@@ -216,7 +211,6 @@ export class SpiritBox {
     if (patch.direction !== undefined) this.cfg.direction = patch.direction
     if (patch.dwellMs !== undefined) this.cfg.dwellMs = Math.max(20, patch.dwellMs)
     if (patch.windowSec !== undefined) this.cfg.windowSec = Math.max(1, patch.windowSec)
-    if (patch.blankMs !== undefined) this.cfg.blankMs = Math.max(0, patch.blankMs)
     this.freq = this.clampToBand(this.freq)
   }
 
@@ -244,17 +238,6 @@ export class SpiritBox {
     if (this.timer !== null) clearTimeout(this.timer)
     this.timer = null
     this.closeWindow()
-  }
-
-  /**
-   * Samples the caller should zero to cover the retune click, at the rate the
-   * audio is running. Reading it consumes the blanking request.
-   */
-  takeBlankSamples(sampleRate: number): number {
-    if (this.blankRemainingMs <= 0) return 0
-    const n = Math.round((this.blankRemainingMs / 1000) * sampleRate)
-    this.blankRemainingMs = 0
-    return n
   }
 
   // -------------------------------------------------------------------------
@@ -325,7 +308,6 @@ export class SpiritBox {
     if (f > this.windowHigh) this.windowHigh = f
 
     await this.hooks.tune(f)
-    this.blankRemainingMs = this.cfg.blankMs
     this.hooks.onHop?.(f, this.hopCount)
 
     if (Date.now() - this.windowStart >= this.cfg.windowSec * 1000) this.closeWindow()

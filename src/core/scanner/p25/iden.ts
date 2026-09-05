@@ -30,11 +30,12 @@ export class IdenTable {
   /** IDEN_UP (0x3D), the 700 and 800 MHz form. */
   setStandard(iden: number, baseUnit: number, spacing: number, bwUnit: number, offsetSign: number, offsetMag: number): void {
     // base is in units of 5 Hz, spacing in 125 Hz, offset magnitude in 250 kHz.
+    // sign bit 0 means the mobile transmits below the base.
     this.table.set(iden, {
       iden,
       baseHz: baseUnit * 5,
       spacingHz: spacing * 125,
-      offsetHz: (offsetSign ? -1 : 1) * offsetMag * 250_000,
+      offsetHz: (offsetSign ? 1 : -1) * offsetMag * 250_000,
       bandwidthHz: bwUnit * 125,
       slotsPerCarrier: 1,
     })
@@ -42,12 +43,13 @@ export class IdenTable {
 
   /** IDEN_UP_VU (0x34), the VHF and UHF form. */
   setVu(iden: number, baseUnit: number, spacing: number, offsetSign: number, offsetMag: number): void {
-    // base in 5 Hz, spacing in 125 Hz, offset magnitude in units of 250 kHz.
+    // base in 5 Hz, spacing in 125 Hz, offset magnitude in units of the
+    // channel spacing. sign bit 0 means the mobile transmits below the base.
     this.table.set(iden, {
       iden,
       baseHz: baseUnit * 5,
       spacingHz: spacing * 125,
-      offsetHz: (offsetSign ? -1 : 1) * offsetMag * 250_000,
+      offsetHz: (offsetSign ? 1 : -1) * offsetMag * spacing * 125,
       bandwidthHz: 12_500,
       slotsPerCarrier: 1,
     })
@@ -55,13 +57,14 @@ export class IdenTable {
 
   /** IDEN_UP_TDMA (0x33), the Phase 2 form. */
   setTdma(iden: number, baseUnit: number, spacing: number, offsetSign: number, offsetMag: number, channelType: number): void {
-    // channelType 3 and 4 are the two-slot TDMA types.
+    // channelType 3 and 4 are the two-slot TDMA types. offset magnitude is in
+    // units of the channel spacing, sign bit 0 is below the base.
     const slots = channelType === 3 || channelType === 4 ? 2 : 1
     this.table.set(iden, {
       iden,
       baseHz: baseUnit * 5,
       spacingHz: spacing * 125,
-      offsetHz: (offsetSign ? -1 : 1) * offsetMag * 250_000,
+      offsetHz: (offsetSign ? 1 : -1) * offsetMag * spacing * 125,
       bandwidthHz: 12_500,
       slotsPerCarrier: slots,
     })

@@ -34,6 +34,10 @@ const sim = computed(() =>
   isSimKind(devices.nodes.find((n) => n.id === props.deviceId)?.kind ?? ''),
 )
 const state = ref<ScanState>('idle')
+// the engine is a plain class, so what it walks through has to be pushed into
+// refs from its hooks or nothing on screen ever changes.
+const currentEntry = ref<ScanEntry | null>(null)
+const held = ref(false)
 const entries = shallowRef<ScanEntry[]>([])
 const calls = shallowRef<ScanCall[]>([])
 const activeCall = ref<ScanCall | null>(null)
@@ -45,6 +49,7 @@ const chosen = computed<ConventionalChannel[]>(() =>
 const scanner = new Scanner(
   {
     tune: async (hz, mode) => {
+      currentEntry.value = scanner.current
       rx.setMode(mode as DemodMode)
       await devices.configure(props.deviceId, { centerHz: hz })
     },
@@ -65,8 +70,8 @@ const scanner = new Scanner(
   { thresholdDb: threshold.value },
 )
 
-// each whisper line lands on the call that is open when it arrives, so a busy
-// channel becomes readable at a glance.
+// a transcript line carries no channel of its own, so it belongs to whichever
+// call is open when it arrives.
 watch(
   () => ears.lines.value.length,
   () => {
@@ -100,16 +105,19 @@ async function start(): Promise<void> {
 async function stop(): Promise<void> {
   scanner.stop()
   running.value = false
+  held.value = scanner.isHeld
   await rx.stop()
 }
 
 function hold(): void {
   scanner.hold(!scanner.isHeld)
   state.value = scanner.currentState
+  held.value = scanner.isHeld
 }
 
 function skip(): void {
   scanner.skip()
+  held.value = scanner.isHeld
 }
 
 function toggleLock(entry: ScanEntry): void {
@@ -122,8 +130,8 @@ function togglePriority(entry: ScanEntry): void {
   entries.value = [...scanner.list]
 }
 
-const currentName = computed(() => scanner.current?.channel.name ?? 'nothing selected')
-const currentHz = computed(() => scanner.current?.channel.hz ?? 0)
+const currentName = computed(() => currentEntry.value?.channel.name ?? 'nothing selected')
+const currentHz = computed(() => currentEntry.value?.channel.hz ?? 0)
 
 onBeforeUnmount(() => {
   scanner.stop()
@@ -133,11 +141,21 @@ onBeforeUnmount(() => {
 
 <template>
   <div>
-    <div class="bn-seg2" style="margin-bottom: 12px">
-      <button type="button" :class="{ 'is-on': mode === 'conventional' }" @click="mode = 'conventional'">
+    <div class="bn-seg2" style="margin-bottom: 12px" role="group" aria-label="scanner type">
+      <button
+        type="button"
+        :class="{ 'is-on': mode === 'conventional' }"
+        :aria-pressed="mode === 'conventional'"
+        @click="mode = 'conventional'"
+      >
         conventional
       </button>
-      <button type="button" :class="{ 'is-on': mode === 'trunked' }" @click="mode = 'trunked'">
+      <button
+        type="button"
+        :class="{ 'is-on': mode === 'trunked' }"
+        :aria-pressed="mode === 'trunked'"
+        @click="mode = 'trunked'"
+      >
         trunked
       </button>
     </div>
@@ -148,18 +166,19 @@ onBeforeUnmount(() => {
     <p class="bn-note" style="margin-top: 0">
       pick what you want to hear, press listen, and the receiver walks the list and stops
       on whatever is talking. these channels are the same everywhere in the country. your
-      local fire and police frequencies are not published in a form we can ship, so import
-      them below.
+      local fire and police frequencies are not bundled, and this build has no way to add
+      them yet.
     </p>
 
     <div class="bn-subhead">what to listen to</div>
-    <div class="bn-pills">
+    <div class="bn-pills" role="group" aria-label="channel groups">
       <button
         v-for="g in CHANNEL_GROUPS"
         :key="g.id"
         type="button"
         class="bn-pill"
         :class="{ 'is-on': selectedGroups.includes(g.id) }"
+        :aria-pressed="selectedGroups.includes(g.id)"
         :title="g.blurb"
         @click="toggleGroup(g.id)"
       >
@@ -192,7 +211,7 @@ onBeforeUnmount(() => {
       <div class="bn-knob">
         <span class="bn-klabel">&nbsp;</span>
         <HbButton size="sm" :disabled="!running" @click="hold">
-          {{ scanner.isHeld ? 'release' : 'hold' }}
+          {{ held ? 'release' : 'hold' }}
         </HbButton>
       </div>
       <div class="bn-knob">

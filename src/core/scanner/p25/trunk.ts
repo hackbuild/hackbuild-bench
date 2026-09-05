@@ -11,11 +11,11 @@ import type { RadioSystem, TalkgroupEntry } from '../systems'
  * which talkgroup is active, on what frequency, from which radio, and whether
  * it is followable inside the current tuned window.
  *
- * Turning IQ into TSBK octets needs a C4FM demodulator, symbol recovery, a
- * trellis decode, and a CRC, which the browser build does not do. So this runs
- * against a control channel decoder when one exists, and against the demo
- * generator otherwise. The parsing, the frequency math, and the call logic are
- * the same either way.
+ * `c4fm.ts` turns IQ into those octets and `tsbk.ts` parses them, so this runs
+ * against a live control channel when a radio is streaming, and against the
+ * demo generator otherwise. The frequency math and the call logic are the same
+ * either way. Voice stays out of reach, LDU frames carry IMBE and this build
+ * has no vocoder.
  */
 
 export interface TrunkCall {

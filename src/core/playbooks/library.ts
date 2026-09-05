@@ -280,13 +280,30 @@ const copyARemote: Playbook = {
         const hz = ctx.get<number>('tunedHz') ?? 433.92e6
         await tuneTo(ctx, dev.id, hz)
         const session = ctx.session<FrameTransmitSession>(dev.id)
-        const send = session?.replayFrame ?? session?.transmit
-        if (!session || !send) {
-          throw new Error(
-            `${dev.label} has no frame transmit path in its driver, only a bare carrier. nothing was sent.`,
-          )
+        if (!session) throw new Error(`${dev.label} is no longer open.`)
+        if (session.transmitFrame) {
+          // the only keying the transmit path has is ook, which is what a fixed
+          // code remote sends. an fsk capture carries its own deviation and
+          // there is no modulator for it, and the afsk path is bell 202 at 1200
+          // and 2200 Hz, a different signal from the one that was captured.
+          if (frame.modulation.kind === 'fsk') {
+            throw new Error(
+              'this capture is fsk. the transmit path can only key ook, and sending it any other way puts a signal on the air that is not the one you captured. nothing was sent.',
+            )
+          }
+          await session.transmitFrame(frame.bytes, {
+            mode: 'ook',
+            bitRate: Math.round(frame.symbolRateHz),
+          })
+        } else {
+          const send = session.replayFrame ?? session.transmit
+          if (!send) {
+            throw new Error(
+              `${dev.label} has no frame transmit path in its driver, only a bare carrier. nothing was sent.`,
+            )
+          }
+          await send.call(session, frame.bytes)
         }
-        await send.call(session, frame.bytes)
         ctx.set('sentCount', (ctx.get<number>('sentCount') ?? 0) + 1)
         ctx.log(`sent ${frame.bytes.length} bytes on ${formatHz(hz)}: ${toHex(frame.bytes)}`)
       },
@@ -353,7 +370,7 @@ const followABluetoothThing: Playbook = {
   title: 'follow a bluetooth thing',
   blurb: 'go from hearing a device advertise to reading its characteristics and naming its buttons',
   icon: 'bluetooth-b',
-  requires: [CAPABILITIES.CAPTURE_PACKET],
+  requires: [CAPABILITIES.CAPTURE_PACKET, CAPABILITIES.CONNECT_GATT],
   steps: [
     {
       id: 'sniff',
@@ -544,7 +561,7 @@ const followABluetoothThing: Playbook = {
       title: 'write down how it is driven',
       detail:
         'reads, writes, and the thing that moved when you pressed the button, put together as the command model for this device.',
-      requires: [],
+      requires: [CAPABILITIES.CONNECT_GATT],
       actionLabel: 'write the summary',
       isComplete: (ctx) => (ctx.get<string[]>('model')?.length ?? 0) > 0,
       run: async (ctx) => {
@@ -824,9 +841,11 @@ const whatIsThisSignal: Playbook = {
 }
 
 function payloadBytes(slice: BitSlice, sync: SyncResult): Uint8Array {
+  // findRepeat measures the period from bit 0, so one frame is bits[0, period).
+  // a head longer than the period leaves the first frame as the whole cut.
   const start = sync.preambleBits
-  const end = sync.period ? start + sync.period : slice.bits.length
-  const cut = slice.bits.slice(start, Math.min(end, slice.bits.length))
+  const end = Math.min(sync.period ?? slice.bits.length, slice.bits.length)
+  const cut = start < end ? slice.bits.slice(start, end) : slice.bits.slice(0, end)
   return packBits(cut.length ? cut : slice.bits)
 }
 
@@ -983,8 +1002,8 @@ const reactToSomething: Playbook = {
         const frame = parseBurst(best.samples, best.sampleRate)
         ctx.set('trigger', {
           deviceId: source.deviceId,
-          kind: 'activity heard',
-          detail: `on ${source.label} at ${formatHz(best.centerHz)}`,
+          kind: 'any activity',
+          detail: `from ${source.label}, first heard at ${formatHz(best.centerHz)}`,
         })
         ctx.log(
           frame
@@ -1039,7 +1058,8 @@ const reactToSomething: Playbook = {
     {
       id: 'pin',
       title: 'choose what happens',
-      detail: 'this runs the action once now, so you can see it move before it is wired to anything.',
+      detail:
+        'this runs the action once now, so you can see it move before it is wired to anything. the pins listed are common numbers, not the ones this board reported, and a pin driven here stays driven until you set it back in the board panel.',
       requires: [CAPABILITIES.GPIO_DRIVE],
       actionLabel: 'try it now',
       choiceKey: 'pinAction',
@@ -1085,8 +1105,9 @@ const reactToSomething: Playbook = {
             kind: pinActionLabel(value),
             detail: `on ${device.label}`,
             deviceId: device.id,
+            pin: action.pin,
+            level: action.value,
           },
-          perform: () => drivePin(ctx, device.id, action),
         })
         ctx.set('ruleMade', true)
         ctx.log('rule added to automations, switched off')
