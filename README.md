@@ -17,13 +17,21 @@ Supported today:
 
 | device | transport | what you get |
 |---|---|---|
-| RTL-SDR | WebUSB | tune, spectrum, waterfall, demodulated audio, spirit box, transcription |
+| RTL-SDR, R820T family | WebUSB | tune, spectrum, waterfall, demodulated audio, spirit box, transcription |
 | HackRF One | WebUSB | wideband receive, IQ capture, transmit behind one confirm |
 | Ubertooth One | WebUSB | 2.4 GHz spectrum, BLE and classic sniffing |
 | Meshtastic | Web Serial, Web Bluetooth | node list, position, messages, send behind one confirm |
 | ESP32 | Web Serial | serial console, auto baud |
 | Conduyt board | Web Serial, Web Bluetooth | pin grid, pwm, i2c scan and read, datastreams, plus whatever modules the board reports (servo, neopixel) |
 | WiFi Pineapple | HTTP | passive survey, client and access point inventory |
+
+The RTL-SDR driver runs any RTL2832U stick with an R820T, R820T2 or R860
+tuner. That covers the generic blue dongles, the RTL-SDR Blog v3, and every
+Nooelec NESDR Mini, Nano and SMArt. Sticks with an E4000 (the NESDR XTR
+line), an R828D (the RTL-SDR Blog v4), or a Fitipower or FCI tuner are
+refused with the chip named. A stick without a TCXO, the original NESDR Mini
+included, reads tens of ppm off. Set the ppm knob until a known station sits
+on its channel.
 
 Conduyt is free firmware you flash onto a maker board you already have. Flash it
 at conduyt.io/playground and the board comes back here as a conduyt node.
