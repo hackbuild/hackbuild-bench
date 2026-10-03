@@ -1,5 +1,6 @@
 /**
- * R820T tuner.
+ * R820T tuner, and the R820T2 and R860 that answer the same way. Every Nooelec
+ * NESDR Mini, Nano and SMArt carries one of the three.
  *
  * The tuner sits behind the RTL2832U i2c gate, so the caller opens the gate
  * before touching any method here and closes it afterwards.
@@ -38,11 +39,15 @@ const MUX_CFGS: Array<[number, number, number, number]> = [
   [588, 0x00, 0x40, 0x00],
 ]
 
-const BIT_REV = [0x0, 0x8, 0x4, 0xc, 0x2, 0xa, 0x6, 0xe, 0x1, 0x9, 0x5, 0xd, 0x3, 0xb, 0x7, 0xf]
+/** Gain added by each lna and mixer step, in tenths of a dB. */
+const LNA_STEPS = [0, 9, 13, 40, 38, 13, 31, 22, 26, 31, 26, 14, 19, 5, 35, 13]
+const MIXER_STEPS = [0, 5, 10, 10, 19, 9, 10, 25, 17, 10, 8, 16, 13, 6, 3, -8]
 
-function clamp(v: number, lo: number, hi: number): number {
-  return v < lo ? lo : v > hi ? hi : v
-}
+/** A vco between these two is one the pll can lock. */
+const VCO_MIN = 1770000000
+const VCO_MAX = VCO_MIN * 2
+
+const BIT_REV = [0x0, 0x8, 0x4, 0xc, 0x2, 0xa, 0x6, 0xe, 0x1, 0x9, 0x5, 0xd, 0x3, 0xb, 0x7, 0xf]
 
 /** addr, value, mask. */
 type MaskWrite = [number, number, number]
@@ -53,6 +58,11 @@ export class R820T {
   /** Mirror of registers 5 to 31 so read modify write needs no bus read. */
   private shadow: Uint8Array
   pllLock = false
+  /**
+   * False when the pll would not lock at the calibration frequency. Some
+   * R820T2 units do this at every power up and tune fine afterwards.
+   */
+  calibrated = false
 
   constructor(com: RtlCom, xtalFreq: number) {
     this.com = com
@@ -61,8 +71,7 @@ export class R820T {
   }
 
   static async detect(com: RtlCom): Promise<boolean> {
-    const v = await com.i2cRead(R820T_ADDR, 0)
-    return v === R820T_ID
+    return (await com.i2cProbe(R820T_ADDR, 0)) === R820T_ID
   }
 
   setXtal(xtalFreq: number): void {
@@ -102,24 +111,31 @@ export class R820T {
       [0x13, 49, 0x3f],
       [0x1d, 0x00, 0x38],
     ])
-    const cap = await this.calibrate(true)
+    const cap = await this.calibrate()
+    this.calibrated = cap !== null
+    // librtlsdr leaves the filter at its power on defaults when calibration
+    // cannot lock, and the tuner still works, so this does the same.
+    if (cap !== null) {
+      await this.each([
+        [0x0a, 0x10 | cap, 0x1f],
+        [0x0b, 0x6b, 0xef],
+        [0x07, 0x00, 0x80],
+        [0x06, 0x10, 0x30],
+        [0x1e, 0x40, 0x60],
+        [0x05, 0x00, 0x80],
+        [0x1f, 0x00, 0x80],
+        [0x0f, 0x00, 0x80],
+        [0x19, 0x60, 0x60],
+      ])
+    }
     await this.each([
-      [0x0a, 0x10 | cap, 0x1f],
-      [0x0b, 0x6b, 0xef],
-      [0x07, 0x00, 0x80],
-      [0x06, 0x10, 0x30],
-      [0x1e, 0x40, 0x60],
-      [0x05, 0x00, 0x80],
-      [0x1f, 0x00, 0x80],
-      [0x0f, 0x00, 0x80],
-      [0x19, 0x60, 0x60],
       [0x1d, 0xe5, 0xc7],
       [0x1c, 0x24, 0xf8],
       [0x0d, 0x53, 0xff],
       [0x0e, 0x75, 0xff],
       [0x05, 0x00, 0x60],
       [0x06, 0x00, 0x08],
-      [0x11, 0x38, 0x08],
+      [0x11, 0x38, 0x38],
       [0x17, 0x30, 0x30],
       [0x0a, 0x40, 0x60],
       [0x1d, 0x00, 0x38],
@@ -128,30 +144,35 @@ export class R820T {
       [0x1a, 0x30, 0x30],
       [0x1d, 0x18, 0x38],
       [0x1c, 0x24, 0x04],
-      [0x1e, 0x0d, 0x1f],
+      [0x1e, 0x0e, 0x1f],
       [0x1a, 0x20, 0x30],
     ])
   }
 
-  /** Runs at 56 MHz, and retries once when the first pass returns a cap code. */
-  async calibrate(first: boolean): Promise<number> {
-    await this.each([
-      [0x0b, 0x6b, 0x60],
-      [0x0f, 0x04, 0x04],
-      [0x10, 0x00, 0x03],
-    ])
-    await this.setPll(56000000)
-    if (!this.pllLock) throw new Error('tuner pll will not lock during filter calibration')
-    await this.each([
-      [0x0b, 0x10, 0x10],
-      [0x0b, 0x00, 0x10],
-      [0x0f, 0x00, 0x04],
-    ])
-    const d = await this.readRegs(0x00, 5)
-    let cap = d[4] & 0x0f
-    if (cap === 0x0f) cap = 0
-    if (cap !== 0 && first) return this.calibrate(false)
-    return cap
+  /**
+   * Filter calibration at 56 MHz, tried twice when the first pass reads back
+   * no usable code. Null when the pll will not lock there.
+   */
+  async calibrate(): Promise<number | null> {
+    let code = 0
+    for (let i = 0; i < 2; i++) {
+      await this.each([
+        [0x0b, 0x6b, 0x60],
+        [0x0f, 0x04, 0x04],
+        [0x10, 0x00, 0x03],
+      ])
+      await this.setPll(56000000)
+      if (!this.pllLock) return null
+      await this.each([
+        [0x0b, 0x10, 0x10],
+        [0x0b, 0x00, 0x10],
+        [0x0f, 0x00, 0x04],
+      ])
+      const d = await this.readRegs(0x00, 5)
+      code = d[4] & 0x0f
+      if (code !== 0 && code !== 0x0f) break
+    }
+    return code === 0x0f ? 0 : code
   }
 
   /** Returns the frequency actually reached, or null when it is out of range. */
@@ -182,16 +203,27 @@ export class R820T {
       [0x1a, 0x00, 0x0c],
       [0x12, 0x80, 0xe0],
     ])
-    let divNum = Math.min(6, Math.floor(Math.log(1770000000 / freq) / Math.LN2))
-    const mixDiv = 1 << (divNum + 1)
+    // below about 27.7 MHz no divider reaches the vco range, and the ratio of
+    // 128 is the closest one. librtlsdr pairs that ratio with divider code 0,
+    // this keeps the code that matches it.
+    let mixDiv = 128
+    let divNum = 6
+    for (let m = 2; m <= 64; m <<= 1) {
+      if (freq * m >= VCO_MIN && freq * m < VCO_MAX) {
+        mixDiv = m
+        divNum = Math.log2(m) - 1
+        break
+      }
+    }
     const d = await this.readRegs(0x00, 5)
     const fine = (d[4] & 0x30) >> 4
     if (fine > 2) divNum--
     else if (fine < 2) divNum++
     await this.wrMask(0x10, divNum << 5, 0xe0)
-    const vco = freq * mixDiv
-    const nint = Math.floor(vco / (2 * ref))
-    const fra = vco % (2 * ref)
+    const vco = Math.round(freq) * mixDiv
+    const vcoDiv = Math.floor((ref + 65536 * vco) / (2 * ref))
+    const nint = Math.floor(vcoDiv / 65536)
+    const sdm = vcoDiv % 65536
     if (nint > 63) {
       this.pllLock = false
       return null
@@ -200,15 +232,14 @@ export class R820T {
     const si = (nint - 13) % 4
     await this.each([
       [0x14, ni + (si << 6), 0xff],
-      [0x12, fra === 0 ? 0x08 : 0x00, 0x08],
+      [0x12, sdm === 0 ? 0x08 : 0x00, 0x08],
     ])
-    const sdm = Math.min(65535, Math.floor((32768 * fra) / ref))
     await this.each([
       [0x16, sdm >> 8, 0xff],
       [0x15, sdm & 0xff, 0xff],
     ])
     await this.checkLock(true)
-    await this.wrMask(0x1a, 0x08, 0x08)
+    if (this.pllLock) await this.wrMask(0x1a, 0x08, 0x08)
     return (2 * ref * (nint + sdm / 65536)) / mixDiv
   }
 
@@ -233,14 +264,21 @@ export class R820T {
     ])
   }
 
-  /** dB maps through two cubics onto a 0 to 30 step split across lna and mixer. */
+  /**
+   * Alternates lna and mixer steps until the sum reaches the asked gain, so
+   * the result lands on or just above it. The vga holds at 16.3 dB.
+   */
   async setManualGain(db: number): Promise<void> {
-    let step: number
-    if (db <= 15) step = Math.round(1.36 + db * (1.1118 + db * (-0.0786 + db * 0.0027)))
-    else step = Math.round(1.2068 + db * (0.6875 + db * (-0.01011 + db * 0.0001587)))
-    step = clamp(step, 0, 30)
-    const lna = Math.floor(step / 2)
-    const mix = Math.floor((step - 1) / 2)
+    const want = Math.round(db * 10)
+    let total = 0
+    let lna = 0
+    let mix = 0
+    for (let i = 0; i < 15; i++) {
+      if (total >= want) break
+      total += LNA_STEPS[++lna]
+      if (total >= want) break
+      total += MIXER_STEPS[++mix]
+    }
     await this.each([
       [0x05, 0x10, 0x10],
       [0x07, 0x00, 0x10],

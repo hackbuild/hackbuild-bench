@@ -1,5 +1,7 @@
 /**
- * RTL-SDR driver: RTL2832U demodulator with an R820T tuner.
+ * RTL-SDR driver: RTL2832U demodulator with an R820T family tuner. That covers
+ * the generic blue dongles, the RTL-SDR Blog v3, and every Nooelec NESDR Mini,
+ * Nano and SMArt.
  *
  * Receive only. The dongle has no transmitter. Its bias tee gpio survives across
  * sessions and across other host applications, so reset clears it.
@@ -12,7 +14,7 @@ import type { DeviceDriver, DeviceHandle, DeviceSession, DriverContext } from '@
 import { UsbPort } from '@/core/transport/webusb'
 import { SpectrumAnalyzer } from '@/core/dsp/fft'
 import { R820T } from './r820t'
-import { BLOCK, IF_FREQ, REG, RTL_VENDORS, RtlCom, XTAL } from './rtlcom'
+import { BLOCK, IF_FREQ, REG, RTL_DEVICES, RtlCom, XTAL } from './rtlcom'
 import type { RtlOp } from './rtlcom'
 
 /** Bulk in endpoint carrying the 8 bit IQ stream. */
@@ -34,7 +36,35 @@ const STREAM_STALL_MS = 3000
 
 const STALL_POLL_MS = 1000
 
-const USB_FILTERS: USBDeviceFilter[] = RTL_VENDORS.map((vendorId) => ({ vendorId }))
+const USB_FILTERS: USBDeviceFilter[] = RTL_DEVICES.map(([vendorId, productId]) => ({
+  vendorId,
+  productId,
+}))
+
+/** The product string Realtek burns in when the maker left the eeprom alone. */
+const GENERIC_PRODUCT = /^rtl28\d\d/i
+
+interface TunerProbe {
+  name: string
+  addr: number
+  reg: number
+  match: (v: number) => boolean
+  afterReset?: boolean
+  note?: string
+}
+
+/**
+ * Tuners other than the R820T family, in the order librtlsdr probes them.
+ * Found only so the refusal can name the chip. The last two answer only after
+ * a reset pulse on gpio 4.
+ */
+const OTHER_TUNERS: TunerProbe[] = [
+  { name: 'e4000', addr: 0xc8, reg: 0x02, match: (v) => v === 0x40, note: 'as on the nesdr xtr' },
+  { name: 'fc0013', addr: 0xc6, reg: 0x00, match: (v) => v === 0xa3 },
+  { name: 'r828d', addr: 0x74, reg: 0x00, match: (v) => v === 0x69, note: 'as on the rtl-sdr blog v4' },
+  { name: 'fc2580', addr: 0xac, reg: 0x01, match: (v) => (v & 0x7f) === 0x56, afterReset: true },
+  { name: 'fc0012', addr: 0xc6, reg: 0x00, match: (v) => v === 0xa1, afterReset: true },
+]
 
 /**
  * The RTL2832U bring up sequence. The 0x1c to 0x2f run is the demod fir
@@ -114,19 +144,23 @@ class RtlSdr {
   async open(ppm: number): Promise<void> {
     this.ppm = ppm || 0
     const com = this.com
-    await this.port.claim({ configuration: 1, interface: 0 })
+    try {
+      await this.port.claim({ configuration: 1, interface: 0 })
+    } catch (err) {
+      const why = err instanceof Error ? err.message : String(err)
+      throw new Error(
+        `the dongle is held by something else (${why}). close any other sdr app using it. ` +
+          'on linux, unload the dvb_usb_rtl28xxu kernel driver. on windows, give it the winusb ' +
+          'driver with zadig.',
+      )
+    }
     await com.writeEach(INIT_OPS)
 
     await com.i2cOpen()
     try {
-      const found = await R820T.detect(com)
-      if (!found) {
-        throw new Error(
-          'this dongle has no r820t tuner. r828d boards, including the rtl-sdr blog v4, are not supported yet.',
-        )
-      }
+      if (!(await R820T.detect(com))) throw new Error(await this.unsupportedTuner())
       this.tuner = new R820T(com, this.correctedXtal())
-      this.tunerName = 'r820t'
+      this.tunerName = 'r820t/r820t2'
       await com.writeEach([
         ['demod', 1, 0xb1, 0x1a, 1],
         ['demod', 0, 0x08, 0x4d, 1],
@@ -142,6 +176,25 @@ class RtlSdr {
         // failure is the one the caller needs.
       }
     }
+  }
+
+  /** Names whatever tuner answered instead, for the refusal. The i2c gate is open. */
+  private async unsupportedTuner(): Promise<string> {
+    let reset = false
+    for (const t of OTHER_TUNERS) {
+      if (t.afterReset && !reset) {
+        await this.setGpioOutput(4)
+        await this.setGpioBit(4, true)
+        await this.setGpioBit(4, false)
+        reset = true
+      }
+      const v = await this.com.i2cProbe(t.addr, t.reg)
+      if (v !== null && t.match(v)) {
+        const note = t.note ? `, ${t.note}` : ''
+        return `this dongle has an ${t.name} tuner${note}. only the r820t family is supported so far.`
+      }
+    }
+    return 'no tuner answered on the i2c bus. unplug the dongle, plug it back in, and connect again.'
   }
 
   async setIfFreq(hz: number): Promise<void> {
@@ -543,14 +596,26 @@ const descriptor: DeviceDescriptor = {
   },
 }
 
+function usbId(d: USBDevice): string {
+  return `${d.vendorId.toString(16).padStart(4, '0')}:${d.productId.toString(16).padStart(4, '0')}`
+}
+
+/**
+ * Makers that rewrite the eeprom, Nooelec among them, leave a model name like
+ * NESDR Mini 2 in the product string. The rest carry Realtek's part number.
+ */
+function labelFor(d: USBDevice): string {
+  const product = d.productName?.trim() ?? ''
+  return product && !GENERIC_PRODUCT.test(product) ? product : 'RTL-SDR'
+}
+
 function handleFor(port: UsbPort): DeviceHandle {
   const d = port.device
-  const id = `${d.vendorId.toString(16).padStart(4, '0')}:${d.productId.toString(16).padStart(4, '0')}`
   return {
     kind: 'rtlsdr',
     transport: 'webusb',
-    uid: port.serial || id,
-    label: port.productName,
+    uid: port.serial || usbId(d),
+    label: labelFor(d),
     raw: port,
   }
 }
@@ -579,18 +644,33 @@ export const rtlsdrDriver: DeviceDriver = {
     const port = handle.raw as UsbPort
     const sdr = new RtlSdr(port)
     const defaults = Object.fromEntries(descriptor.params.map((p) => [p.key, p.default]))
-    await sdr.open(defaults.ppm)
+    let rate: number
+    let center: number
+    try {
+      await sdr.open(defaults.ppm)
+      rate = await sdr.setSampleRate(defaults.sampleRate)
+      await sdr.setGain(defaults.gain >= GAIN_AUTO_AT ? null : defaults.gain)
+      center = await sdr.setCenterFrequency(defaults.centerHz)
+    } catch (err) {
+      // a claimed interface outlives a failed open, and the next connect
+      // would be refused for it.
+      await sdr.close().catch(() => undefined)
+      throw err
+    }
 
-    const rate = await sdr.setSampleRate(defaults.sampleRate)
-    await sdr.setGain(defaults.gain >= GAIN_AUTO_AT ? null : defaults.gain)
-    const center = await sdr.setCenterFrequency(defaults.centerHz)
-
+    const d = port.device
     const info: Record<string, string> = {
       tuner: sdr.tunerName,
       pll: sdr.tunerLocked ? 'locked' : 'no lock',
       serial: port.serial || 'none reported',
+      maker: d.manufacturerName?.trim() || 'none reported',
       product: port.productName,
+      usb: usbId(d),
       sampleRate: `${Math.round(rate)} sps`,
+    }
+    if (sdr.tuner && !sdr.tuner.calibrated) {
+      info.filter = 'uncalibrated'
+      ctx.log('tuner pll would not lock for filter calibration, running on the default filter')
     }
     ctx.setInfo(info)
     ctx.log(

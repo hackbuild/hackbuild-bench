@@ -35,11 +35,53 @@ export const XTAL = 28800000
 export const IF_FREQ = 3570000
 
 /**
- * Vendor ids that ship an RTL2832U front end. No product ids are filtered,
- * since the same silicon appears under dozens of them.
+ * Every vendor and product pair librtlsdr opens. Matching on vendor alone
+ * would offer every Realtek part on the machine, ethernet adapters and card
+ * readers included. Nooelec NESDR sticks enumerate as 0bda:2838.
  */
-export const RTL_VENDORS = [
-  0x0bda, 0x0413, 0x0458, 0x0ccd, 0x1554, 0x15f4, 0x185b, 0x1b80, 0x1d19, 0x1f4d, 0x1209,
+export const RTL_DEVICES: Array<[number, number, string]> = [
+  [0x0bda, 0x2832, 'generic rtl2832u'],
+  [0x0bda, 0x2838, 'generic rtl2832u oem'],
+  [0x0413, 0x6680, 'digitalnow quad dvb-t'],
+  [0x0413, 0x6f0f, 'leadtek winfast dtv mini d'],
+  [0x0458, 0x707f, 'genius tvgo dvb-t03'],
+  [0x0ccd, 0x00a9, 'terratec cinergy t stick black'],
+  [0x0ccd, 0x00b3, 'terratec noxon dab'],
+  [0x0ccd, 0x00b4, 'terratec deutschlandradio dab'],
+  [0x0ccd, 0x00b5, 'terratec noxon dab radio energy'],
+  [0x0ccd, 0x00b7, 'terratec media broadcast dab'],
+  [0x0ccd, 0x00b8, 'terratec br dab'],
+  [0x0ccd, 0x00b9, 'terratec wdr dab'],
+  [0x0ccd, 0x00c0, 'terratec muellerverlag dab'],
+  [0x0ccd, 0x00c6, 'terratec fraunhofer dab'],
+  [0x0ccd, 0x00d3, 'terratec cinergy t stick rc'],
+  [0x0ccd, 0x00d7, 'terratec t stick plus'],
+  [0x0ccd, 0x00e0, 'terratec noxon dab rev 2'],
+  [0x1554, 0x5020, 'pixelview pv-dt235u'],
+  [0x15f4, 0x0131, 'astrometa dvb-t2'],
+  [0x15f4, 0x0133, 'hanftek dab fm dvb-t'],
+  [0x185b, 0x0620, 'compro videomate u620f'],
+  [0x185b, 0x0650, 'compro videomate u650f'],
+  [0x185b, 0x0680, 'compro videomate u680f'],
+  [0x1b80, 0xd393, 'gigabyte gt-u7300'],
+  [0x1b80, 0xd394, 'dikom usb-dvbt hd'],
+  [0x1b80, 0xd395, 'peak 102569agpk'],
+  [0x1b80, 0xd397, 'kworld kw-ub450-t'],
+  [0x1b80, 0xd398, 'zaapa zt-mindvbzp'],
+  [0x1b80, 0xd39d, 'sveon stv20'],
+  [0x1b80, 0xd3a4, 'twintech ut-40'],
+  [0x1b80, 0xd3a8, 'asus u3100mini plus v2'],
+  [0x1b80, 0xd3af, 'sveon stv27'],
+  [0x1b80, 0xd3b0, 'sveon stv21'],
+  [0x1d19, 0x1101, 'dexatek dk dvb-t'],
+  [0x1d19, 0x1102, 'dexatek msi digivox mini ii'],
+  [0x1d19, 0x1103, 'dexatek dk 5217'],
+  [0x1d19, 0x1104, 'msi digivox micro hd'],
+  [0x1f4d, 0xa803, 'sweex dvb-t'],
+  [0x1f4d, 0xb803, 'gtek t803'],
+  [0x1f4d, 0xc803, 'lifeview lv5tdeluxe'],
+  [0x1f4d, 0xd286, 'mygica td312'],
+  [0x1f4d, 0xd803, 'prolectrix dv107669'],
 ]
 
 /** One entry in a batched register write. */
@@ -125,6 +167,19 @@ export class RtlCom {
   async i2cRead(addr: number, reg: number): Promise<number> {
     await this.writeRegBuf(BLOCK.I2C, addr, new Uint8Array([reg]).buffer)
     return this.readReg(BLOCK.I2C, addr, 1)
+  }
+
+  /**
+   * Reads one register from an address that may have nothing behind it. The
+   * RTL2832U answers an i2c nak with a stalled control transfer, which means
+   * no chip there, so it comes back as null.
+   */
+  async i2cProbe(addr: number, reg: number): Promise<number | null> {
+    try {
+      return await this.i2cRead(addr, reg)
+    } catch {
+      return null
+    }
   }
 
   async i2cWrite(addr: number, reg: number, value: number): Promise<void> {
