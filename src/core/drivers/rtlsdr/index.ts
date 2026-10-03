@@ -36,6 +36,19 @@ const STREAM_STALL_MS = 3000
 
 const STALL_POLL_MS = 1000
 
+/**
+ * A hung dongle never completes its transfers and webusb cannot cancel them,
+ * so teardown waits this long and then releases the interface, which does.
+ */
+const UNWIND_MS = 1000
+
+function settle(p: Promise<void>): Promise<void> {
+  return Promise.race([
+    p.catch(() => undefined),
+    new Promise<void>((r) => setTimeout(r, UNWIND_MS)),
+  ])
+}
+
 const USB_FILTERS: USBDeviceFilter[] = RTL_DEVICES.map(([vendorId, productId]) => ({
   vendorId,
   productId,
@@ -129,6 +142,10 @@ class RtlSdr {
   ppm = 0
   rate = 0
   freq = 100000000
+  /** The frequency asked for, before the pll rounds it. Null until the first tune. */
+  private wantHz: number | null = null
+  /** Where the tuner parks the signal for the demod. It moves with the sample rate. */
+  private ifHz = IF_FREQ
   /** False when the pll did not report lock at the last tune. */
   tunerLocked = true
 
@@ -159,6 +176,12 @@ class RtlSdr {
     await com.i2cOpen()
     try {
       if (!(await R820T.detect(com))) throw new Error(await this.unsupportedTuner())
+      const d = this.port.device
+      // the v4 lite answers as an r820t but needs a different vco reference
+      // and an input switch, so tuning it as one lands off frequency.
+      if (d.manufacturerName === 'RTLSDRBlog' && d.productName === 'Blog V4L') {
+        throw new Error('the rtl-sdr blog v4 lite needs its own tuner handling, which is not written yet.')
+      }
       this.tuner = new R820T(com, this.correctedXtal())
       this.tunerName = 'r820t/r820t2'
       await com.writeEach([
@@ -214,7 +237,17 @@ class RtlSdr {
     const ratio = Math.floor((XTAL * 4194304) / rate) & 0x0ffffffc
     const realRatio = ratio | ((ratio & 0x08000000) << 1)
     const real = (XTAL * 4194304) / realRatio
-    const off = -1 * Math.floor((this.ppm * 16777216) / 1e6)
+    if (this.tuner) {
+      await this.com.i2cOpen()
+      try {
+        this.ifHz = await this.tuner.setBandwidth(Math.floor(real))
+      } finally {
+        await this.com.i2cClose()
+      }
+      await this.setIfFreq(this.ifHz)
+      if (this.wantHz !== null) await this.setCenterFrequency(this.wantHz)
+    }
+    const off = Math.trunc((-this.ppm * 16777216) / 1e6)
     await this.com.writeEach([
       ['demod', 1, 0x9f, (ratio >> 16) & 0xffff, 2],
       ['demod', 1, 0xa1, ratio & 0xffff, 2],
@@ -227,18 +260,20 @@ class RtlSdr {
     return real
   }
 
-  /** The tuner is parked IF_FREQ above, since the demod shifts it back down. */
+  /** The tuner is parked the if above, since the demod shifts it back down. */
   async setCenterFrequency(hz: number): Promise<number> {
     if (!this.tuner) throw new Error('tuner is not initialised')
     await this.com.i2cOpen()
     let actual: number | null
     try {
-      actual = await this.tuner.setFrequency(hz + IF_FREQ)
+      actual = await this.tuner.setFrequency(hz + this.ifHz)
     } finally {
       await this.com.i2cClose()
     }
     this.tunerLocked = this.tuner.pllLock
-    this.freq = actual === null ? hz : actual - IF_FREQ
+    if (actual === null) throw new Error(`the tuner cannot reach ${Math.round(hz)} hz`)
+    this.wantHz = hz
+    this.freq = actual - this.ifHz
     return this.freq
   }
 
@@ -257,12 +292,11 @@ class RtlSdr {
     await this.com.writeDemod(0, 0x19, on ? 0x25 : 0x05, 1)
   }
 
+  /** The sample rate step retunes the if and the centre against the corrected crystal. */
   async setPpm(ppm: number): Promise<void> {
     this.ppm = ppm
     this.tuner?.setXtal(this.correctedXtal())
-    await this.setIfFreq(IF_FREQ)
     await this.setSampleRate(this.rate)
-    await this.setCenterFrequency(this.freq)
   }
 
   async setGpioOutput(bit: number): Promise<void> {
@@ -279,10 +313,15 @@ class RtlSdr {
     await this.com.writeReg(BLOCK.SYS, REG.GPO, val ? r | m : r & ~m, 1)
   }
 
-  /** Bias tee is gpio bit 0 on every board in this family. */
-  async setBiasTee(on: boolean): Promise<void> {
-    await this.setGpioOutput(0)
-    await this.setGpioBit(0, on)
+  /**
+   * The bias tee is gpio 0 on boards that have one. A pin nothing has made an
+   * output cannot be powering it, and on other boards it may be an input, so
+   * it is left alone.
+   */
+  async clearBiasTee(): Promise<void> {
+    const oe = await this.com.readReg(BLOCK.SYS, REG.GPOE, 1)
+    if (!(oe & 1)) return
+    await this.setGpioBit(0, false)
   }
 
   async resetBuffer(): Promise<void> {
@@ -294,6 +333,12 @@ class RtlSdr {
 
   /** The i2c gate and the demod power state outlive the port, so both are cleared here. */
   async close(): Promise<void> {
+    // a refused claim usually means another program is streaming from this
+    // dongle, and device control transfers would still reach it.
+    if (!this.port.isOpen) {
+      await this.port.release()
+      return
+    }
     if (this.tuner) {
       try {
         await this.com.i2cOpen()
@@ -329,6 +374,8 @@ class RtlSession implements DeviceSession {
   private pumping: Promise<void> | null = null
   /** Held past a stream failure so teardown still waits for the transfers to unwind. */
   private pending: Promise<void> | null = null
+  /** Two tools asking at once must share one stream. */
+  private starting: Promise<void> | null = null
   private abort: AbortController | null = null
   private lastChunk = 0
   private stallMisses = 0
@@ -369,8 +416,6 @@ class RtlSession implements DeviceSession {
       if (params.ppm !== undefined && params.ppm !== this.applied.ppm) {
         await this.sdr.setPpm(params.ppm)
         this.applied.ppm = params.ppm
-        this.applied.sampleRate = this.sdr.rate
-        this.applied.centerHz = this.sdr.freq
       }
       if (params.sampleRate !== undefined && params.sampleRate !== this.applied.sampleRate) {
         const real = await this.sdr.setSampleRate(params.sampleRate)
@@ -401,7 +446,17 @@ class RtlSession implements DeviceSession {
       throw new Error(`rtl-sdr has no ${mode} mode. it takes iq, spectrum, or rx.`)
     }
     if (this.pumping) return
+    if (this.starting) return this.starting
+    const starting = this.begin()
+    this.starting = starting
+    try {
+      await starting
+    } finally {
+      if (this.starting === starting) this.starting = null
+    }
+  }
 
+  private async begin(): Promise<void> {
     const abort = new AbortController()
     this.abort = abort
     this.ctx.signal.addEventListener('abort', () => abort.abort(), {
@@ -411,9 +466,11 @@ class RtlSession implements DeviceSession {
 
     const previous = this.pending
     this.pending = null
-    if (previous) await previous.catch(() => undefined)
+    if (previous) await settle(previous)
 
     await this.serial(() => this.sdr.resetBuffer())
+    // a stop that landed during the awaits above has already aborted this.
+    if (abort.signal.aborted) return
     this.streamFailed = false
     this.stallMisses = 0
     this.lastChunk = performance.now()
@@ -487,13 +544,13 @@ class RtlSession implements DeviceSession {
     this.pumping = null
     const pending = this.pending
     this.pending = null
-    if (pending) await pending.catch(() => undefined)
+    if (pending) await settle(pending)
   }
 
   async resetToSafeState(): Promise<void> {
     await this.stop()
     try {
-      await this.serial(() => this.sdr.setBiasTee(false))
+      await this.serial(() => this.sdr.clearBiasTee())
     } catch {
       // the device may already be gone, in which case its bias tee is off too.
     }

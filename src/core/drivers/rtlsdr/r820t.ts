@@ -6,6 +6,7 @@
  * before touching any method here and closes it afterwards.
  */
 
+import { IF_FREQ } from './rtlcom'
 import type { RtlCom } from './rtlcom'
 
 /** Tuner address on the gated i2c bus. The R828D answers at 0x74 instead. */
@@ -43,6 +44,13 @@ const MUX_CFGS: Array<[number, number, number, number]> = [
 const LNA_STEPS = [0, 9, 13, 40, 38, 13, 31, 22, 26, 31, 26, 14, 19, 5, 35, 13]
 const MIXER_STEPS = [0, 5, 10, 10, 19, 9, 10, 25, 17, 10, 8, 16, 13, 6, 3, -8]
 
+/** Low pass corners of the if filter, widest first, in Hz. */
+const IF_LOW_PASS = [1700000, 1600000, 1550000, 1450000, 1200000, 900000, 700000, 550000, 450000, 350000]
+
+/** What the two if high pass stages add to the passband, in Hz. */
+const IF_HIGH_PASS_1 = 350000
+const IF_HIGH_PASS_2 = 380000
+
 /** A vco between these two is one the pll can lock. */
 const VCO_MIN = 1770000000
 const VCO_MAX = VCO_MIN * 2
@@ -63,6 +71,7 @@ export class R820T {
    * R820T2 units do this at every power up and tune fine afterwards.
    */
   calibrated = false
+  private initDone = false
 
   constructor(com: RtlCom, xtalFreq: number) {
     this.com = com
@@ -147,6 +156,61 @@ export class R820T {
       [0x1e, 0x0e, 0x1f],
       [0x1a, 0x20, 0x30],
     ])
+    this.initDone = true
+  }
+
+  /**
+   * Fits the if filter to the sample rate and returns the if it centres on,
+   * which the demod has to be told. At 2.43 MHz and below the filter narrows
+   * and the if drops with it.
+   */
+  async setBandwidth(bw: number): Promise<number> {
+    let reg0a: number
+    let reg0b: number
+    let ifHz: number
+    if (bw > 7000000) {
+      reg0a = 0x10
+      reg0b = 0x0b
+      ifHz = 4570000
+    } else if (bw > 6000000) {
+      reg0a = 0x10
+      reg0b = 0x2a
+      ifHz = 4570000
+    } else if (bw > IF_LOW_PASS[0] + IF_HIGH_PASS_1 + IF_HIGH_PASS_2) {
+      reg0a = 0x10
+      reg0b = 0x6b
+      ifHz = IF_FREQ
+    } else {
+      reg0a = 0x00
+      reg0b = 0x80
+      ifHz = 2300000
+      let real = 0
+      if (bw > IF_LOW_PASS[0] + IF_HIGH_PASS_1) {
+        bw -= IF_HIGH_PASS_2
+        ifHz += IF_HIGH_PASS_2
+        real += IF_HIGH_PASS_2
+      } else {
+        reg0b |= 0x20
+      }
+      if (bw > IF_LOW_PASS[0]) {
+        bw -= IF_HIGH_PASS_1
+        ifHz += IF_HIGH_PASS_1
+        real += IF_HIGH_PASS_1
+      } else {
+        reg0b |= 0x40
+      }
+      let i = 0
+      while (i < IF_LOW_PASS.length && !(bw > IF_LOW_PASS[i])) i++
+      i = Math.max(0, i - 1)
+      reg0b |= 15 - i
+      real += IF_LOW_PASS[i]
+      ifHz -= Math.trunc(real / 2)
+    }
+    await this.each([
+      [0x0a, reg0a, 0x10],
+      [0x0b, reg0b, 0xef],
+    ])
+    return ifHz
   }
 
   /**
@@ -198,11 +262,7 @@ export class R820T {
 
   async setPll(freq: number): Promise<number | null> {
     const ref = Math.floor(this.xtal)
-    await this.each([
-      [0x10, 0x00, 0x10],
-      [0x1a, 0x00, 0x0c],
-      [0x12, 0x80, 0xe0],
-    ])
+    await this.wrMask(0x1a, 0x00, 0x0c)
     // below about 27.7 MHz no divider reaches the vco range, and the ratio of
     // 128 is the closest one. librtlsdr pairs that ratio with divider code 0,
     // this keeps the code that matches it.
@@ -219,7 +279,12 @@ export class R820T {
     const fine = (d[4] & 0x30) >> 4
     if (fine > 2) divNum--
     else if (fine < 2) divNum++
-    await this.wrMask(0x10, divNum << 5, 0xe0)
+    // the vco current and the dividers go in only after the fine tune read,
+    // since the current changes what that read returns.
+    await this.each([
+      [0x10, divNum << 5, 0xf0],
+      [0x12, 0x80, 0xe0],
+    ])
     const vco = Math.round(freq) * mixDiv
     const vcoDiv = Math.floor((ref + 65536 * vco) / (2 * ref))
     const nint = Math.floor(vcoDiv / 65536)
@@ -235,8 +300,8 @@ export class R820T {
       [0x12, sdm === 0 ? 0x08 : 0x00, 0x08],
     ])
     await this.each([
-      [0x16, sdm >> 8, 0xff],
       [0x15, sdm & 0xff, 0xff],
+      [0x16, sdm >> 8, 0xff],
     ])
     await this.checkLock(true)
     if (this.pllLock) await this.wrMask(0x1a, 0x08, 0x08)
@@ -289,9 +354,10 @@ export class R820T {
   }
 
   async shutdown(): Promise<void> {
+    if (!this.initDone) return
     await this.each([
       [0x06, 0xb1, 0xff],
-      [0x05, 0xb3, 0xff],
+      [0x05, 0xa0, 0xff],
       [0x07, 0x3a, 0xff],
       [0x08, 0x40, 0xff],
       [0x09, 0xc0, 0xff],

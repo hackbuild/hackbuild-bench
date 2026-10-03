@@ -142,6 +142,12 @@ export class DeviceBus {
 
     try {
       const session = await driver.open(handle, ctx)
+      // a detach while open was running has already dropped this entry, and
+      // nothing else would release what the driver just claimed.
+      if (abort.signal.aborted) {
+        await session.close().catch(() => undefined)
+        throw new Error(`${node.label} was let go before it finished opening`)
+      }
       entry.session = session
       // the panel shows node.params from the descriptor defaults, so the session
       // has to hold those same values before the first knob move.
@@ -158,6 +164,7 @@ export class DeviceBus {
       this.ensureHealthLoop()
       return node
     } catch (err) {
+      if (!this.live.has(id)) throw err
       node.status = 'error'
       node.error = err instanceof Error ? err.message : String(err)
       this.fire({ type: 'error', deviceId: id, message: node.error, at: Date.now() })

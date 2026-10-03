@@ -55,7 +55,17 @@ export class UsbPort {
       await this.device.selectConfiguration(opts.configuration ?? 1)
     }
     this.iface = opts.interface
-    await this.device.claimInterface(this.iface)
+    try {
+      await this.device.claimInterface(this.iface)
+    } catch (err) {
+      // release() skips a port that never claimed, so the open is undone here.
+      try {
+        await this.device.close()
+      } catch {
+        // already closed or unplugged.
+      }
+      throw err
+    }
     if (opts.alternate !== undefined) {
       await this.device.selectAlternateInterface(this.iface, opts.alternate)
     }
