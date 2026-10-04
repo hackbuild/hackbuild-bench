@@ -17,7 +17,7 @@ Supported today:
 
 | device | transport | what you get |
 |---|---|---|
-| RTL-SDR, R820T family | WebUSB | tune, spectrum, waterfall, demodulated audio, spirit box, transcription |
+| RTL-SDR, every librtlsdr tuner | WebUSB | tune, spectrum, waterfall, sweep, demodulated audio, spirit box, transcription |
 | HackRF One | WebUSB | wideband receive, IQ capture, transmit behind one confirm |
 | Ubertooth One | WebUSB | 2.4 GHz spectrum, BLE and classic sniffing |
 | Meshtastic | Web Serial, Web Bluetooth | node list, position, messages, send behind one confirm |
@@ -25,13 +25,35 @@ Supported today:
 | Conduyt board | Web Serial, Web Bluetooth | pin grid, pwm, i2c scan and read, datastreams, plus whatever modules the board reports (servo, neopixel) |
 | WiFi Pineapple | HTTP | passive survey, client and access point inventory |
 
-The RTL-SDR driver runs any RTL2832U stick with an R820T, R820T2 or R860
-tuner. That covers the generic blue dongles, the RTL-SDR Blog v3, and every
-Nooelec NESDR Mini, Nano and SMArt. Sticks with an E4000 (the NESDR XTR
-line), an R828D (the RTL-SDR Blog v4), or a Fitipower or FCI tuner are
-refused with the chip named. A stick without a TCXO, the original NESDR Mini
-included, reads tens of ppm off. Set the ppm knob until a known station sits
-on its channel.
+The RTL-SDR driver runs every tuner librtlsdr does:
+
+- the R820T, R820T2 and R860: generic dongles, the RTL-SDR Blog v3, and
+  every Nooelec NESDR Mini, Nano and SMArt
+- the R828D, including the RTL-SDR Blog v4 with its hf upconverter. The Blog
+  v4 lite is an R820T with the same upconverter, and is handled too.
+- the E4000: the Nooelec NESDR XTR
+- the FC0012, FC0013 and FC2580
+
+The tuner is probed at connect, and the controls narrow to what that chip
+reaches.
+
+- On a stick with an hf input wired to the q adc, such as the Blog v3 or the
+  NESDR SMArt v5, set the hf input knob and anything below the tuner's range
+  is received by direct sampling.
+- A stick without a TCXO, the original NESDR Mini included, reads tens of ppm
+  off. Set the ppm knob until a known station sits on its channel. The value
+  is remembered for that stick.
+- The bias tee knob puts dc on the antenna port, for a powered lna. It always
+  starts off.
+
+The spectrum tab measures as well as draws. It has:
+
+- a frequency axis and band plan
+- peak, next peak and delta markers
+- max and min hold, averaging, and a settable fft size and window
+- noise floor, snr and rbw readouts
+- png and csv export
+- a stepped sweep that stitches a range wider than the radio sees at once
 
 Conduyt is free firmware you flash onto a maker board you already have. Flash it
 at conduyt.io/playground and the board comes back here as a conduyt node.
