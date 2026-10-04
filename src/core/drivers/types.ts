@@ -1,5 +1,5 @@
 import type { Capability } from '../capabilities'
-import type { ArtifactDraft, DeviceDescriptor, TransportKind } from '../types'
+import type { ArtifactDraft, DeviceDescriptor, TransportKind, UnitDescription } from '../types'
 
 /**
  * The adapter contract. Every device implements exactly this and nothing more.
@@ -31,6 +31,13 @@ export interface DeviceSession {
 
   /** Identity read off the hardware. Merged into node.info. */
   getInfo(): Record<string, string>
+
+  /**
+   * Params and limits for this unit when they differ from the descriptor,
+   * such as the range of the tuner it turned out to have. Read after open and
+   * again after every configure, so a setting can widen or narrow a range.
+   */
+  describe?(): UnitDescription
 
   /** Apply parameter changes. Called on every knob move, so keep it cheap. */
   configure(params: Record<string, number>): Promise<void>

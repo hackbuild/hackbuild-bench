@@ -2764,3 +2764,141 @@ canvas {
   margin-top: 5px;
   display: block;
 }
+
+/* ---- spectrum furniture ------------------------------------------------- */
+
+/* the readout under the pointer sits on the trace, so it carries its own void. */
+.bn-hover {
+  position: absolute;
+  top: var(--hb-s1);
+  right: var(--hb-s2);
+  font-family: var(--hb-readout);
+  font-size: 15px;
+  color: var(--hb-paper);
+  background: var(--hb-void);
+  border: 1px solid var(--hb-lit-dim);
+  padding: 0 var(--hb-s1);
+  pointer-events: none;
+  white-space: nowrap;
+}
+
+/* frequency axis between the trace and the waterfall, as SDR++ places it. */
+.bn-axis {
+  position: relative;
+  height: 20px;
+  background: var(--hb-void);
+  border: var(--hb-border) solid var(--hb-ink);
+  border-top: 0;
+  overflow: hidden;
+  user-select: none;
+}
+.bn-axis.is-pan {
+  cursor: grab;
+  touch-action: none;
+}
+.bn-axis .bn-tick {
+  position: absolute;
+  top: 0;
+  height: 100%;
+  border-left: 1px solid var(--hb-lit-dim);
+  padding-left: var(--hb-s1);
+  font-family: var(--hb-readout);
+  font-size: 14px;
+  line-height: 20px;
+  color: var(--hb-paper);
+  opacity: 0.8;
+  white-space: nowrap;
+}
+.bn-axis .bn-unit {
+  position: absolute;
+  right: var(--hb-s1);
+  top: 0;
+  font-family: var(--hb-utility);
+  font-size: 9px;
+  line-height: 20px;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--hb-paper);
+  opacity: 0.6;
+  background: var(--hb-void);
+  padding-left: var(--hb-s1);
+}
+.bn-axis .bn-mark {
+  position: absolute;
+  top: 0;
+  width: 0;
+  height: 6px;
+  border-left: 2px solid var(--hb-lit-info);
+}
+
+/* band plan strip, low alpha so it labels without competing with the trace. */
+.bn-bands {
+  position: relative;
+  height: 16px;
+  background: var(--hb-void);
+  border: var(--hb-border) solid var(--hb-ink);
+  border-top: 0;
+  overflow: hidden;
+}
+.bn-bands span {
+  position: absolute;
+  top: 2px;
+  bottom: 2px;
+  background: color-mix(in srgb, var(--hb-lit-info) 18%, transparent);
+  border-left: 1px solid var(--hb-lit-info);
+  border-right: 1px solid var(--hb-lit-info);
+  font-family: var(--hb-utility);
+  font-size: 9px;
+  line-height: 12px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--hb-paper);
+  padding: 0 var(--hb-s1);
+  overflow: hidden;
+  white-space: nowrap;
+}
+
+.bn-tools {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--hb-s2);
+  align-items: center;
+  margin: var(--hb-s2) 0;
+}
+.bn-tools .bn-sep {
+  width: 1px;
+  align-self: stretch;
+  background: var(--hb-ink-4);
+  margin: 0 var(--hb-s1);
+}
+
+.bn-goto {
+  display: flex;
+  gap: var(--hb-s2);
+  align-items: center;
+  flex-wrap: wrap;
+}
+.bn-goto .hb-input {
+  width: 9.5em;
+  font-family: var(--hb-readout);
+  font-size: 17px;
+}
+.bn-goto .bn-klabel {
+  font-family: var(--hb-utility);
+  font-size: 9px;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--hb-ink-3);
+}
+.bn-goto .hb-select {
+  width: auto;
+}
+/* the library dial is sized to stand alone. here it shares a row with the
+   step buttons and the listen button, so it is set smaller. */
+.bn-dial .hb-dial {
+  font-size: clamp(34px, 6vw, 56px);
+  padding: var(--hb-s1) var(--hb-s2);
+}
+.bn-tools .hb-select {
+  width: auto;
+}

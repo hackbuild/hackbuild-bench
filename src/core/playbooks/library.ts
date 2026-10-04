@@ -1,5 +1,6 @@
 import { CAPABILITIES } from '@/core/capabilities'
 import { formatHz, toAscii, toHex } from '@/core/format'
+import { reaches } from '@/core/dsp/spectrumMath'
 import type { Artifact, FftFrame, IqChunk, PacketRecord, ParamSpec } from '@/core/types'
 import {
   burstScore,
@@ -91,9 +92,12 @@ async function tuneTo(ctx: PlaybookContext, deviceId: string, hz: number): Promi
   const node = ctx.bus.node(deviceId)
   if (!node) throw new Error('that device is no longer on the bench.')
   const centre = node.descriptor.params.find((p) => p.key === 'centerHz')
-  if (centre && (hz < centre.min || hz > centre.max)) {
+  if (centre && !reaches(centre, hz)) {
+    const inside = hz >= centre.min && hz <= centre.max
     throw new Error(
-      `${node.label} tunes ${formatHz(centre.min)} to ${formatHz(centre.max)}, so it cannot reach ${formatHz(hz)}. pick another band, or plug in a radio with the range.`,
+      inside
+        ? `${node.label} has a gap in its range at ${formatHz(hz)}, so it cannot reach it. pick another band, or plug in a radio that covers it.`
+        : `${node.label} tunes ${formatHz(centre.min)} to ${formatHz(centre.max)}, so it cannot reach ${formatHz(hz)}. pick another band, or plug in a radio with the range.`,
     )
   }
   const params: Record<string, number> = {}

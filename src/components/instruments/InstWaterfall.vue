@@ -13,6 +13,7 @@ import {
   normalise,
   onReducedMotion,
   peakAt,
+  peakBetween,
   prefersReducedMotion,
   readTokens,
 } from './canvas'
@@ -35,6 +36,10 @@ interface Props {
   markerWidth?: number
   /** Let a pointer set the listening point. */
   interactive?: boolean
+  /** The visible part of the span, as fractions of it. */
+  view?: [number, number]
+  /** Paint a row for every this many frames, so the history covers more time. */
+  rowEvery?: number
 }
 
 const props = withDefaults(defineProps<Props>(), {
@@ -46,9 +51,53 @@ const props = withDefaults(defineProps<Props>(), {
   marker: null,
   markerWidth: 0,
   interactive: false,
+  view: () => [0, 1] as [number, number],
+  rowEvery: 1,
 })
 
-const emit = defineEmits<{ tune: [fraction: number] }>()
+const emit = defineEmits<{
+  tune: [fraction: number]
+  step: [dir: number]
+  zoom: [factor: number, about: number]
+  pan: [delta: number]
+}>()
+
+const viewW = computed(() => Math.max(1e-6, props.view[1] - props.view[0]))
+
+function toSpan(x: number): number {
+  return props.view[0] + x * viewW.value
+}
+function toScreen(f: number): number {
+  return (f - props.view[0]) / viewW.value
+}
+
+/** The bins inside the view, so a zoomed history spends every column on them. */
+function visible(bins: Float32Array): Float32Array {
+  const n = bins.length
+  const lo = Math.max(0, Math.floor(props.view[0] * n))
+  const hi = Math.min(n, Math.max(lo + 2, Math.ceil(props.view[1] * n)))
+  return lo === 0 && hi === n ? bins : bins.subarray(lo, hi)
+}
+
+const pointers = new Map<number, number>()
+let pinchFrom = 0
+
+function screenAt(clientX: number): number {
+  const el = canvas.value ?? shell.value
+  if (!el) return 0.5
+  const r = el.getBoundingClientRect()
+  if (r.width <= 0) return 0.5
+  return Math.max(0, Math.min(1, (clientX - r.left) / r.width))
+}
+
+function onWheel(ev: WheelEvent): void {
+  if (!props.interactive) return
+  const about = toSpan(screenAt(ev.clientX))
+  if (ev.ctrlKey || ev.metaKey) emit('zoom', ev.deltaY < 0 ? 1.25 : 0.8, about)
+  else if (ev.shiftKey) emit('pan', (ev.deltaY > 0 ? 0.1 : -0.1) * viewW.value)
+  else emit('step', ev.deltaY < 0 ? 1 : -1)
+  ev.preventDefault()
+}
 
 const canvas = ref<HTMLCanvasElement | null>(null)
 
@@ -62,15 +111,20 @@ let moved = false
 
 /** The spectrum is drawn across the canvas, which is inside the shell border. */
 function fractionAt(ev: PointerEvent): number {
-  const el = canvas.value ?? shell.value
-  if (!el) return 0.5
-  const r = el.getBoundingClientRect()
-  if (r.width <= 0) return 0.5
-  return Math.max(0, Math.min(1, (ev.clientX - r.left) / r.width))
+  return toSpan(screenAt(ev.clientX))
 }
 
 function onDown(ev: PointerEvent): void {
   if (!props.interactive || !shell.value) return
+  pointers.set(ev.pointerId, ev.clientX)
+  if (pointers.size === 2) {
+    // a second finger turns the gesture into a pinch and cancels the tune.
+    tuning = false
+    const xs = [...pointers.values()]
+    pinchFrom = Math.abs(xs[0] - xs[1])
+    shell.value.setPointerCapture(ev.pointerId)
+    return
+  }
   tuning = true
   downX = ev.clientX
   moved = false
@@ -82,6 +136,16 @@ function onDown(ev: PointerEvent): void {
 }
 
 function onMove(ev: PointerEvent): void {
+  if (pointers.has(ev.pointerId)) pointers.set(ev.pointerId, ev.clientX)
+  if (pointers.size === 2) {
+    const xs = [...pointers.values()]
+    const spread = Math.abs(xs[0] - xs[1])
+    if (pinchFrom > 8 && spread > 8 && Math.abs(spread - pinchFrom) > 6) {
+      emit('zoom', spread / pinchFrom, toSpan(screenAt((xs[0] + xs[1]) / 2)))
+      pinchFrom = spread
+    }
+    return
+  }
   if (!tuning) return
   // a touch that becomes a page scroll must not tune on its way past.
   if (!moved && Math.abs(ev.clientX - downX) <= SLOP) return
@@ -90,12 +154,14 @@ function onMove(ev: PointerEvent): void {
 }
 
 function onUp(ev: PointerEvent): void {
+  pointers.delete(ev.pointerId)
   if (!tuning) return
   if (!moved) emit('tune', fractionAt(ev))
   onCancel(ev)
 }
 
 function onCancel(ev: PointerEvent): void {
+  pointers.delete(ev.pointerId)
   if (!tuning) return
   tuning = false
   const el = shell.value
@@ -113,9 +179,9 @@ const markerText = computed(() => markerReadout(props.marker, props.markerWidth)
 
 function onKey(ev: KeyboardEvent): void {
   if (ev.shiftKey) return
-  const next = markerKeyTarget(ev.key, props.marker ?? 0.5)
+  const next = markerKeyTarget(ev.key, toScreen(props.marker ?? 0.5))
   if (next === null) return
-  emit('tune', next)
+  emit('tune', toSpan(next))
   ev.preventDefault()
 }
 
@@ -159,14 +225,30 @@ function pushRow(level: (x: number, w: number) => number): void {
   ctx.putImageData(row, 0, 0)
 }
 
+let skipped = 0
+
 function fromBins(bins: Float32Array): void {
+  const shown = visible(bins)
   const win = props.auto
-    ? range.update(bins)
+    ? range.update(shown)
     : { minDb: props.minDb, maxDb: props.maxDb }
+  if (++skipped < Math.max(1, props.rowEvery)) return
+  skipped = 0
+  const full = viewW.value >= 0.999
   pushRow((x, w) => {
+    const v = full ? peakAt(bins, x, w) : peakBetween(bins, toSpan(x / w), toSpan((x + 1) / w))
     // the gamma keeps the noise floor dark so carriers read as the signal.
-    return normalise(peakAt(bins, x, w), win.minDb, win.maxDb) ** 1.9
+    return normalise(v, win.minDb, win.maxDb) ** 1.9
   })
+}
+
+/** Wipes the history, for a change that makes the old rows mean something else. */
+function clearHistory(): void {
+  const screen = surface()
+  if (!screen || !tokens) return
+  screen.ctx.fillStyle = tokens.screen
+  screen.ctx.fillRect(0, 0, screen.w, screen.h)
+  range.reset()
 }
 
 function fromPlaceholder(): void {
@@ -245,10 +327,24 @@ onBeforeUnmount(() => {
   stopMotion = null
 })
 
-// A frame arrives as a new array. Mutating one in place will not add a row.
+// A frame arrives as a new array, and each one is exactly one row. The dB
+// window travels with the frames, so it must not add a row of its own.
 watch(
-  () => [props.bins, props.demo, props.height, props.minDb, props.maxDb],
+  () => props.bins,
+  (bins) => {
+    if (bins && bins.length > 1) {
+      halt()
+      fromBins(bins)
+    } else restart()
+  },
+)
+watch(
+  () => [props.demo, props.height],
   () => restart(),
+)
+watch(
+  () => props.view,
+  () => clearHistory(),
 )
 </script>
 
@@ -266,6 +362,7 @@ watch(
     @pointermove="onMove"
     @pointerup="onUp"
     @pointercancel="onCancel"
+    @wheel="onWheel"
   >
     <canvas
       ref="canvas"
@@ -281,8 +378,8 @@ watch(
           position: 'absolute',
           top: 0,
           bottom: 0,
-          left: (marker - (markerWidth ?? 0) / 2) * 100 + '%',
-          width: (markerWidth ?? 0) * 100 + '%',
+          left: toScreen(marker - (markerWidth ?? 0) / 2) * 100 + '%',
+          width: ((markerWidth ?? 0) / viewW) * 100 + '%',
           background: 'var(--hb-pink)',
           opacity: 0.18,
           pointerEvents: 'none',
@@ -294,7 +391,7 @@ watch(
           position: 'absolute',
           top: 0,
           bottom: 0,
-          left: marker * 100 + '%',
+          left: toScreen(marker) * 100 + '%',
           width: '1px',
           background: 'var(--hb-pink)',
           pointerEvents: 'none',
@@ -314,7 +411,7 @@ watch(
           position: 'absolute',
           top: 0,
           bottom: 0,
-          left: handleLeft(marker),
+          left: handleLeft(Math.min(1, Math.max(0, toScreen(marker)))),
           width: HANDLE_PX + 'px',
           pointerEvents: 'none',
         }"

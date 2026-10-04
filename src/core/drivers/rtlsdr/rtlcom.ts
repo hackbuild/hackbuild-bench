@@ -186,6 +186,14 @@ export class RtlCom {
     await this.writeRegBuf(BLOCK.I2C, addr, new Uint8Array([reg, value]).buffer)
   }
 
+  /** Writes consecutive registers starting at reg in one transfer. */
+  async i2cWriteBuf(addr: number, reg: number, data: Uint8Array): Promise<void> {
+    const buf = new Uint8Array(data.length + 1)
+    buf[0] = reg
+    buf.set(data, 1)
+    await this.writeRegBuf(BLOCK.I2C, addr, buf.buffer)
+  }
+
   async i2cReadBuf(addr: number, reg: number, len: number): Promise<Uint8Array> {
     await this.writeRegBuf(BLOCK.I2C, addr, new Uint8Array([reg]).buffer)
     return this.readRegBuf(BLOCK.I2C, addr, len)

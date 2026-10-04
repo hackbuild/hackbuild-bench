@@ -14,10 +14,19 @@ import {
   normalise,
   onReducedMotion,
   peakAt,
+  peakBetween,
   prefersReducedMotion,
   readTokens,
 } from './canvas'
 import type { ScreenTokens } from './canvas'
+import { dbTicks } from '@/core/dsp/spectrumMath'
+import { formatHz } from '@/core/format'
+
+/** A labelled point on the trace, as a fraction of the whole span. */
+export interface ScopeMarker {
+  at: number
+  label: string
+}
 
 interface Props {
   /** dB magnitudes, low bin to high bin. */
@@ -31,12 +40,25 @@ interface Props {
   auto?: boolean
   /** Run the placeholder trace while bins is null. */
   demo?: boolean
-  /** Listening point as a fraction of the width. null draws no marker. */
+  /** Listening point as a fraction of the span. null draws no marker. */
   marker?: number | null
-  /** Passband width as a fraction of the width, centred on the marker. */
+  /** Passband width as a fraction of the span, centred on the marker. */
   markerWidth?: number
   /** Let a pointer move the marker and drag its edges. */
   interactive?: boolean
+  /** A click places a pick instead of moving the marker. */
+  pickable?: boolean
+  /** The visible part of the span, as fractions of it. */
+  view?: [number, number]
+  /** Edges of the whole span in Hz, for the hover readout. */
+  lowHz?: number
+  highHz?: number
+  /** Max hold and min hold traces, drawn dim under the live one. */
+  hold?: Float32Array | null
+  floor?: Float32Array | null
+  markers?: ScopeMarker[]
+  /** Label the dB gridlines. */
+  dbAxis?: boolean
 }
 
 const props = withDefaults(defineProps<Props>(), {
@@ -49,9 +71,26 @@ const props = withDefaults(defineProps<Props>(), {
   marker: null,
   markerWidth: 0,
   interactive: false,
+  pickable: false,
+  view: () => [0, 1] as [number, number],
+  lowHz: 0,
+  highHz: 0,
+  hold: null,
+  floor: null,
+  markers: () => [],
+  dbAxis: false,
 })
 
-const emit = defineEmits<{ tune: [fraction: number]; width: [fraction: number] }>()
+const emit = defineEmits<{
+  tune: [fraction: number]
+  width: [fraction: number]
+  pick: [fraction: number]
+  /** One tuning step up or down, from the wheel. */
+  step: [dir: number]
+  /** Zoom by factor about a fraction of the span. */
+  zoom: [factor: number, about: number]
+  pan: [delta: number]
+}>()
 
 const range = new AutoRange()
 
@@ -62,18 +101,67 @@ let raf = 0
 let phase = 0
 let observer: ResizeObserver | null = null
 let stopMotion: (() => void) | null = null
+/** Pointer position as a fraction of the drawn width, null when away. */
+const hoverX = ref<number | null>(null)
 
-function graticule(ctx: CanvasRenderingContext2D, w: number, h: number, colour: string): void {
+const viewLo = computed(() => props.view[0])
+const viewW = computed(() => Math.max(1e-6, props.view[1] - props.view[0]))
+
+/** Screen fraction to span fraction and back. */
+function toSpan(x: number): number {
+  return viewLo.value + x * viewW.value
+}
+function toScreen(f: number): number {
+  return (f - viewLo.value) / viewW.value
+}
+
+/** The bins inside the view, so a zoomed trace spends every column on them. */
+function visible(bins: Float32Array): Float32Array {
+  const n = bins.length
+  const lo = Math.max(0, Math.floor(viewLo.value * n))
+  const hi = Math.min(n, Math.max(lo + 2, Math.ceil(props.view[1] * n)))
+  return lo === 0 && hi === n ? bins : bins.subarray(lo, hi)
+}
+
+function windowFor(bins: Float32Array | null): { minDb: number; maxDb: number } {
+  if (!props.auto) return { minDb: props.minDb, maxDb: props.maxDb }
+  return bins ? range.update(bins) : { minDb: props.minDb, maxDb: props.maxDb }
+}
+
+function graticule(
+  ctx: CanvasRenderingContext2D,
+  w: number,
+  h: number,
+  win: { minDb: number; maxDb: number },
+): void {
+  if (!tokens) return
   ctx.save()
-  ctx.strokeStyle = colour
-  ctx.globalAlpha = 0.18
+  ctx.strokeStyle = tokens.dim
+  ctx.fillStyle = tokens.dim
   ctx.lineWidth = 1
-  for (let y = h / 3; y < h - 1; y += h / 3) {
-    const line = Math.round(y) + 0.5
-    ctx.beginPath()
-    ctx.moveTo(0, line)
-    ctx.lineTo(w, line)
-    ctx.stroke()
+  const ticks = props.dbAxis ? dbTicks(win.minDb, win.maxDb) : []
+  if (ticks.length) {
+    ctx.font = `13px ${tokens.readout}`
+    ctx.textBaseline = 'bottom'
+    for (const db of ticks) {
+      const y = Math.round(h - 2 - normalise(db, win.minDb, win.maxDb) * (h - 4)) + 0.5
+      ctx.globalAlpha = 0.18
+      ctx.beginPath()
+      ctx.moveTo(0, y)
+      ctx.lineTo(w, y)
+      ctx.stroke()
+      ctx.globalAlpha = 0.9
+      ctx.fillText(`${db}`, 4, y - 1)
+    }
+  } else {
+    ctx.globalAlpha = 0.18
+    for (let y = h / 3; y < h - 1; y += h / 3) {
+      const line = Math.round(y) + 0.5
+      ctx.beginPath()
+      ctx.moveTo(0, line)
+      ctx.lineTo(w, line)
+      ctx.stroke()
+    }
   }
   ctx.restore()
 }
@@ -83,11 +171,13 @@ function traceBins(
   w: number,
   h: number,
   bins: Float32Array,
+  win: { minDb: number; maxDb: number },
 ): void {
-  const win = props.auto ? range.update(bins) : { minDb: props.minDb, maxDb: props.maxDb }
+  const full = viewW.value >= 0.999
   ctx.beginPath()
   for (let x = 0; x < w; x++) {
-    const y = h - 2 - normalise(peakAt(bins, x, w), win.minDb, win.maxDb) * (h - 4)
+    const v = full ? peakAt(bins, x, w) : peakBetween(bins, toSpan(x / w), toSpan((x + 1) / w))
+    const y = h - 2 - normalise(v, win.minDb, win.maxDb) * (h - 4)
     if (x) ctx.lineTo(x, y)
     else ctx.moveTo(x, y)
   }
@@ -121,8 +211,8 @@ function tracePlaceholder(ctx: CanvasRenderingContext2D, w: number, h: number): 
 function drawMarker(ctx: CanvasRenderingContext2D, w: number, h: number): void {
   const m = props.marker
   if (m === null || m === undefined || !tokens) return
-  const x = m * w
-  const band = Math.max(2, (props.markerWidth ?? 0) * w)
+  const x = toScreen(m) * w
+  const band = Math.max(2, ((props.markerWidth ?? 0) / viewW.value) * w)
   ctx.save()
   ctx.fillStyle = tokens.pink
   ctx.globalAlpha = 0.15
@@ -135,6 +225,58 @@ function drawMarker(ctx: CanvasRenderingContext2D, w: number, h: number): void {
   ctx.restore()
 }
 
+/** Measurement markers: a paper tick and its label, so they never read as the trace. */
+function drawMarkers(ctx: CanvasRenderingContext2D, w: number, h: number): void {
+  if (!tokens || !props.markers.length) return
+  ctx.save()
+  ctx.font = `600 10px ${tokens.utility}`
+  ctx.textBaseline = 'top'
+  for (const mk of props.markers) {
+    const f = toScreen(mk.at)
+    if (f < 0 || f > 1) continue
+    const x = Math.round(f * w) + 0.5
+    ctx.strokeStyle = tokens.paper
+    ctx.globalAlpha = 0.7
+    ctx.setLineDash([3, 3])
+    ctx.beginPath()
+    ctx.moveTo(x, 14)
+    ctx.lineTo(x, h)
+    ctx.stroke()
+    ctx.setLineDash([])
+    ctx.globalAlpha = 1
+    ctx.fillStyle = tokens.paper
+    const tw = ctx.measureText(mk.label).width
+    ctx.fillText(mk.label, Math.min(w - tw - 2, Math.max(2, x - tw / 2)), 1)
+  }
+  ctx.restore()
+}
+
+const hoverText = computed(() => {
+  const x = hoverX.value
+  if (x === null || !props.bins?.length) return ''
+  const f = toSpan(x)
+  const n = props.bins.length
+  const db = props.bins[Math.min(n - 1, Math.max(0, Math.floor(f * n)))]
+  const db1 = Number.isFinite(db) ? `${db.toFixed(1)} dB` : ''
+  if (!(props.highHz > props.lowHz)) return db1
+  const hz = props.lowHz + f * (props.highHz - props.lowHz)
+  return `${formatHz(hz, 4)}  ${db1}`
+})
+
+function drawHover(ctx: CanvasRenderingContext2D, w: number, h: number): void {
+  const x = hoverX.value
+  if (x === null || !tokens || dragging) return
+  ctx.save()
+  ctx.strokeStyle = tokens.paper
+  ctx.globalAlpha = 0.35
+  const px = Math.round(x * w) + 0.5
+  ctx.beginPath()
+  ctx.moveTo(px, 0)
+  ctx.lineTo(px, h)
+  ctx.stroke()
+  ctx.restore()
+}
+
 function draw(): void {
   const el = canvas.value
   if (!el || !tokens) return
@@ -142,38 +284,74 @@ function draw(): void {
   if (!screen) return
   const { ctx, w, h } = screen
   ctx.clearRect(0, 0, w, h)
-  graticule(ctx, w, h, tokens.dim)
+  const live = props.bins && props.bins.length > 1 ? props.bins : null
+  const win = windowFor(live ? visible(live) : null)
+  graticule(ctx, w, h, win)
+  ctx.lineWidth = 1
+  if (props.floor && props.floor.length > 1) {
+    ctx.strokeStyle = tokens.dim
+    traceBins(ctx, w, h, props.floor, win)
+  }
+  if (props.hold && props.hold.length > 1) {
+    ctx.strokeStyle = tokens.slime
+    ctx.globalAlpha = 0.7
+    traceBins(ctx, w, h, props.hold, win)
+    ctx.globalAlpha = 1
+  }
   ctx.strokeStyle = tokens.pink
   ctx.lineWidth = 1.5
-  if (props.bins && props.bins.length > 1) traceBins(ctx, w, h, props.bins)
+  if (live) traceBins(ctx, w, h, live, win)
   else if (props.demo) tracePlaceholder(ctx, w, h)
   drawMarker(ctx, w, h)
+  drawMarkers(ctx, w, h)
+  drawHover(ctx, w, h)
 }
 
 type Grab = 'centre' | 'low' | 'high'
 let dragging: Grab | null = null
 let downX = 0
 let moved = false
+/** Live pointers, for a two finger pinch. */
+const pointers = new Map<number, number>()
+let pinchFrom = 0
 
-function fractionAt(ev: PointerEvent): number {
+function screenAt(clientX: number): number {
   const el = canvas.value
   if (!el) return 0.5
   const r = el.getBoundingClientRect()
   if (r.width <= 0) return 0.5
-  return Math.max(0, Math.min(1, (ev.clientX - r.left) / r.width))
+  return Math.max(0, Math.min(1, (clientX - r.left) / r.width))
+}
+
+function fractionAt(ev: PointerEvent): number {
+  return toSpan(screenAt(ev.clientX))
+}
+
+function pinchSpread(): number {
+  const xs = [...pointers.values()]
+  return xs.length < 2 ? 0 : Math.abs(xs[0] - xs[1])
 }
 
 function onDown(ev: PointerEvent): void {
   const el = canvas.value
-  if (!props.interactive || !el) return
+  if (!el) return
+  pointers.set(ev.pointerId, ev.clientX)
+  if (pointers.size === 2) {
+    // a second finger turns the gesture into a pinch and cancels any tune.
+    dragging = null
+    pinchFrom = pinchSpread()
+    el.setPointerCapture(ev.pointerId)
+    return
+  }
+  if (!props.interactive && !props.pickable) return
   const r = el.getBoundingClientRect()
   const f = fractionAt(ev)
   const centre = props.marker ?? 0.5
   const half = (props.markerWidth ?? 0) / 2
   // within a few pixels of an edge grabs the edge, anywhere else retunes.
-  const grab = r.width > 0 ? 7 / r.width : 0.01
-  if (half > 0 && Math.abs(f - (centre - half)) < grab) dragging = 'low'
-  else if (half > 0 && Math.abs(f - (centre + half)) < grab) dragging = 'high'
+  const grab = r.width > 0 ? (7 / r.width) * viewW.value : 0.01
+  if (props.interactive && half > 0 && Math.abs(f - (centre - half)) < grab) dragging = 'low'
+  else if (props.interactive && half > 0 && Math.abs(f - (centre + half)) < grab) dragging = 'high'
   else dragging = 'centre'
   downX = ev.clientX
   moved = false
@@ -185,50 +363,138 @@ function onDown(ev: PointerEvent): void {
 }
 
 function onMove(ev: PointerEvent): void {
+  if (pointers.has(ev.pointerId)) pointers.set(ev.pointerId, ev.clientX)
+  if (pointers.size === 2) {
+    const spread = pinchSpread()
+    if (pinchFrom > 8 && spread > 8 && Math.abs(spread - pinchFrom) > 6) {
+      const mid = [...pointers.values()].reduce((a, b) => a + b, 0) / 2
+      emit('zoom', spread / pinchFrom, toSpan(screenAt(mid)))
+      pinchFrom = spread
+    }
+    return
+  }
+  if (ev.pointerType === 'mouse') {
+    hoverX.value = screenAt(ev.clientX)
+    if (!raf) draw()
+  }
   if (!dragging) return
   if (dragging === 'centre') {
     // a touch that becomes a page scroll must not tune on its way past.
     if (!moved && Math.abs(ev.clientX - downX) <= SLOP) return
     moved = true
-    emit('tune', fractionAt(ev))
+    place(fractionAt(ev))
     return
   }
   emit('width', Math.abs(fractionAt(ev) - (props.marker ?? 0.5)) * 2)
 }
 
+/** A tuning trace moves the listening point, a measuring trace drops a pick. */
+function place(f: number): void {
+  if (props.interactive) emit('tune', f)
+  else emit('pick', f)
+}
+
 function onUp(ev: PointerEvent): void {
+  pointers.delete(ev.pointerId)
   if (!dragging) return
-  if (dragging === 'centre' && !moved) emit('tune', fractionAt(ev))
+  if (dragging === 'centre' && !moved) place(fractionAt(ev))
   onCancel(ev)
 }
 
 function onCancel(ev: PointerEvent): void {
+  pointers.delete(ev.pointerId)
   if (!dragging) return
   dragging = null
   const el = canvas.value
   if (el?.hasPointerCapture(ev.pointerId)) el.releasePointerCapture(ev.pointerId)
 }
 
-/** The canvas hands its role to the slider only when there is a slider. */
+function onLeave(): void {
+  hoverX.value = null
+  if (!raf) draw()
+}
+
+/**
+ * The wheel steps the listening point, ctrl or cmd with the wheel zooms about
+ * the pointer, and shift with the wheel pans, as gqrx and SDR++ do.
+ */
+function onWheel(ev: WheelEvent): void {
+  if (!props.interactive && !props.pickable) return
+  const about = toSpan(screenAt(ev.clientX))
+  if (ev.ctrlKey || ev.metaKey) {
+    emit('zoom', ev.deltaY < 0 ? 1.25 : 0.8, about)
+  } else if (ev.shiftKey) {
+    emit('pan', (ev.deltaY > 0 ? 0.1 : -0.1) * viewW.value)
+  } else if (props.interactive) {
+    emit('step', ev.deltaY < 0 ? 1 : -1)
+  } else return
+  ev.preventDefault()
+}
+
+/**
+ * The canvas hands its role to a slider when there is something to move: the
+ * listening point on a tuning trace, the first marker on a measuring one.
+ */
 const hasHandle = computed(
-  () => props.interactive && props.marker !== null && props.marker !== undefined,
+  () => (props.interactive && props.marker !== null && props.marker !== undefined) || props.pickable,
 )
 
-const markerNow = computed(() => Number((props.marker ?? 0.5).toFixed(3)))
+/** Where the keyboard handle sits, as a fraction of the span. */
+const handleAt = computed(() =>
+  props.interactive ? (props.marker ?? 0.5) : (props.markers[0]?.at ?? toSpan(0.5)),
+)
 
-const markerText = computed(() => markerReadout(props.marker, props.markerWidth))
+const markerNow = computed(() => Number(handleAt.value.toFixed(3)))
+
+const markerText = computed(() => {
+  if (!props.interactive) {
+    const at = props.markers[0]?.at
+    if (at === undefined) return 'no marker placed. arrows place one.'
+    if (!(props.highHz > props.lowHz)) return `marker ${(at * 100).toFixed(1)}% across`
+    return `marker at ${formatHz(props.lowHz + at * (props.highHz - props.lowHz), 4)}`
+  }
+  if (props.highHz > props.lowHz && props.marker !== null) {
+    const span = props.highHz - props.lowHz
+    const hz = props.lowHz + (props.marker ?? 0.5) * span
+    return `listening at ${formatHz(hz, 4)}, ${formatHz((props.markerWidth ?? 0) * span, 1)} wide`
+  }
+  return markerReadout(props.marker, props.markerWidth)
+})
 
 function onKey(ev: KeyboardEvent): void {
-  const dir = arrowStep(ev.key)
-  if (ev.shiftKey) {
-    if (!dir) return
-    emit('width', clamp01((props.markerWidth ?? 0) + dir * KEY_STEP))
+  if (ev.key === '+' || ev.key === '=') {
+    emit('zoom', 1.5, props.marker ?? 0.5)
     ev.preventDefault()
     return
   }
-  const next = markerKeyTarget(ev.key, props.marker ?? 0.5)
+  if (ev.key === '-' || ev.key === '_') {
+    emit('zoom', 1 / 1.5, props.marker ?? 0.5)
+    ev.preventDefault()
+    return
+  }
+  if (ev.key === '[' || ev.key === ']') {
+    if (props.interactive) emit('step', ev.key === ']' ? 1 : -1)
+    else emit('pan', (ev.key === ']' ? 0.1 : -0.1) * viewW.value)
+    ev.preventDefault()
+    return
+  }
+  if (!props.interactive) {
+    const next = markerKeyTarget(ev.key, toScreen(handleAt.value))
+    if (next === null) return
+    emit('pick', toSpan(next))
+    ev.preventDefault()
+    return
+  }
+  const dir = arrowStep(ev.key)
+  if (ev.shiftKey) {
+    if (!dir) return
+    emit('width', clamp01((props.markerWidth ?? 0) + dir * KEY_STEP * viewW.value))
+    ev.preventDefault()
+    return
+  }
+  const next = markerKeyTarget(ev.key, toScreen(props.marker ?? 0.5))
   if (next === null) return
-  emit('tune', next)
+  emit('tune', toSpan(next))
   ev.preventDefault()
 }
 
@@ -277,8 +543,17 @@ watch(
     props.maxDb,
     props.marker,
     props.markerWidth,
+    props.view,
+    props.hold,
+    props.floor,
+    props.markers,
   ],
   () => restart(),
+)
+
+watch(
+  () => props.view,
+  () => range.reset(),
 )
 </script>
 
@@ -287,7 +562,10 @@ watch(
     <canvas
       ref="canvas"
       style="height: 100%"
-      :style="{ touchAction: interactive ? 'pan-y' : undefined, cursor: interactive ? 'ew-resize' : undefined }"
+      :style="{
+        touchAction: interactive || pickable ? 'pan-y' : undefined,
+        cursor: interactive ? 'ew-resize' : pickable ? 'crosshair' : undefined,
+      }"
       :role="hasHandle ? undefined : 'img'"
       :aria-label="hasHandle ? undefined : 'spectrum trace'"
       :aria-hidden="hasHandle ? 'true' : undefined"
@@ -295,13 +573,17 @@ watch(
       @pointermove="onMove"
       @pointerup="onUp"
       @pointercancel="onCancel"
+      @pointerleave="onLeave"
+      @wheel="onWheel"
     ></canvas>
+    <span v-if="hoverText" class="bn-hover" aria-hidden="true">{{ hoverText }}</span>
     <div
       v-if="hasHandle"
       ref="handle"
       role="slider"
       tabindex="0"
-      aria-label="listening point, spectrum"
+      :aria-label="interactive ? 'listening point, spectrum' : 'measurement marker, spectrum'"
+      aria-keyshortcuts="ArrowLeft ArrowRight [ ] + -"
       :aria-valuemin="0"
       :aria-valuemax="1"
       :aria-valuenow="markerNow"
@@ -310,7 +592,7 @@ watch(
         position: 'absolute',
         top: 0,
         bottom: 0,
-        left: handleLeft(marker ?? 0.5),
+        left: handleLeft(Math.min(1, Math.max(0, toScreen(handleAt)))),
         width: HANDLE_PX + 'px',
         pointerEvents: 'none',
       }"

@@ -1,17 +1,32 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, ref, watch } from 'vue'
-import { HbButton, HbIcon } from '@virgilvox/hackbuild-ui'
+import { computed, onBeforeUnmount, ref, useId, watch } from 'vue'
+import { HbButton, HbDial, HbIcon, HbInput, HbSelect } from '@virgilvox/hackbuild-ui'
 import InstScope from '@/components/instruments/InstScope.vue'
 import InstWaterfall from '@/components/instruments/InstWaterfall.vue'
 import InstSmeter from '@/components/instruments/InstSmeter.vue'
 import InstKnob from '@/components/instruments/InstKnob.vue'
+import InstFreqAxis from '@/components/instruments/InstFreqAxis.vue'
+import InstBandStrip from '@/components/instruments/InstBandStrip.vue'
 import EarsPanel from './EarsPanel.vue'
 import { useDevices } from '@/stores/devices'
 import { useBench } from '@/stores/bench'
 import { useDeviceStream } from '@/composables/useDeviceStream'
 import { useReceiver } from '@/composables/useReceiver'
+import { useSpectrumView } from '@/composables/useSpectrumView'
 import { isSimKind } from '@/core/drivers/sim/simulate'
 import { formatHz, formatRate } from '@/core/format'
+import { BAND_PLAN } from '@/core/bandplan'
+import {
+  ENBW,
+  MEDIAN_TO_MEAN_DB,
+  binsIn,
+  channelPower,
+  nearestReachable,
+  noiseFloor,
+  parseFrequency,
+  reaches,
+  snapTo,
+} from '@/core/dsp/spectrumMath'
 import type { DeviceToolProps } from '@/tools/types'
 import type { ParamSpec } from '@/core/types'
 import type { DemodMode } from '@/core/dsp/demod'
@@ -22,31 +37,146 @@ const devices = useDevices()
 const bench = useBench()
 const stream = useDeviceStream(props.deviceId)
 const rx = useReceiver(props.deviceId)
+const view = useSpectrumView(props.deviceId)
 
 const node = computed(() => devices.nodes.find((n) => n.id === props.deviceId) ?? null)
 const streaming = computed(() => node.value?.status === 'streaming')
 const sim = computed(() => isSimKind(node.value?.kind ?? ''))
 
+const centerHz = computed({
+  get: () => node.value?.params.centerHz ?? 0,
+  set: (v: number) => void devices.configure(props.deviceId, { centerHz: v }),
+})
+
 /** The window on screen, which is what the marker positions are measured in. */
 const span = computed(
-  () => rx.windowHz.value || stream.sampleRate.value || node.value?.params.sampleRate || 0,
+  () =>
+    view.spanHz.value ||
+    rx.windowHz.value ||
+    stream.sampleRate.value ||
+    node.value?.params.sampleRate ||
+    0,
 )
 
-/** Where the marker sits across the display, 0 at the left edge and 1 at the right. */
+/**
+ * The centre the frames on screen were taken at. Right after a retune, and
+ * while idle, the frames still come from the last centre, and the axis has
+ * to describe them, not the one just asked for.
+ */
+const windowCenter = computed(() => (view.bins.value && view.centerHz.value) || centerHz.value)
+
+/** Edges of the window the radio is handing over, for the axis and the readouts. */
+const lowHz = computed(() => windowCenter.value - span.value / 2)
+const highHz = computed(() => windowCenter.value + span.value / 2)
+
+/** Where the marker sits across the window, 0 at the low edge and 1 at the high. */
 const marker = computed(() => (span.value ? 0.5 + rx.offsetHz.value / span.value : 0.5))
 const markerWidth = computed(() => (span.value ? rx.bandwidthHz.value / span.value : 0))
 
 /** The frequency actually being demodulated, offset included. */
 const listeningHz = computed(() => centerHz.value + rx.offsetHz.value)
 
+const STEPS = [
+  { label: '1 kHz', value: 1000 },
+  { label: '5 kHz', value: 5000 },
+  { label: '6.25 kHz', value: 6250 },
+  { label: '8.33 kHz', value: 25000 / 3 },
+  { label: '10 kHz', value: 10000 },
+  { label: '12.5 kHz', value: 12500 },
+  { label: '25 kHz', value: 25000 },
+  { label: '50 kHz', value: 50000 },
+  { label: '100 kHz', value: 100000 },
+  { label: '200 kHz', value: 200000 },
+]
+
+/** The step each mode is usually channelised on. */
+const MODE_STEP: Record<DemodMode, number> = {
+  fm: 100000,
+  nfm: 12500,
+  am: 10000,
+  usb: 1000,
+  lsb: 1000,
+  raw: 1000,
+}
+
+const step = ref<number>(MODE_STEP[rx.mode.value])
+
+const centerSpec = computed(() => node.value?.descriptor.params.find((p) => p.key === 'centerHz'))
+
+function clampHz(hz: number): number {
+  const s = centerSpec.value
+  return s ? nearestReachable(s, hz) : hz
+}
+
+/**
+ * Listens at hz. Inside the window it moves the listening point and leaves
+ * the radio alone, past the edge it retunes the radio onto hz.
+ */
+function goTo(hz: number, edge = 0.45): void {
+  const target = clampHz(hz)
+  const off = target - centerHz.value
+  if (span.value && Math.abs(off) <= span.value * edge) {
+    rx.setOffset(off)
+    return
+  }
+  rx.setOffset(0)
+  centerHz.value = target
+}
+
+/**
+ * A click lands inside the window, so it never retunes. Snapping can push a
+ * click by the window edge past it, and that one is taken unsnapped.
+ */
 function tuneTo(fraction: number): void {
   if (!span.value) return
-  rx.setOffset((fraction - 0.5) * span.value)
+  const hz = lowHz.value + fraction * span.value
+  const snapped = snapTo(hz, step.value)
+  const target = Math.abs(snapped - centerHz.value) <= span.value / 2 ? snapped : hz
+  rx.setOffset(clampHz(target) - centerHz.value)
 }
 
 function widthTo(fraction: number): void {
   if (!span.value) return
   rx.setBandwidth(fraction * span.value)
+}
+
+/** The next channel on the step grid in that direction, never one past it. */
+function stepBy(dir: number): void {
+  const here = listeningHz.value
+  const near = snapTo(here, step.value)
+  const onGrid = Math.abs(near - here) < 1
+  const next = onGrid || (dir > 0 ? near < here : near > here) ? near + dir * step.value : near
+  goTo(next)
+}
+
+/** The dial reads and writes MHz. */
+const dialMhz = computed({
+  get: () => listeningHz.value / 1e6,
+  set: (mhz: number) => goTo(mhz * 1e6),
+})
+// counted on the value as the dial rounds it, so 99.99996 shows as 100.0000.
+const dialDigits = computed(() => {
+  const shown = Math.round(dialMhz.value * 1e4) / 1e4
+  return Math.max(1, Math.floor(Math.log10(Math.max(1, shown))) + 1)
+})
+
+const uid = useId()
+const gotoId = `${uid}-goto`
+const hintId = `${uid}-hint`
+const stepId = `${uid}-step`
+
+const typed = ref('')
+const typedBad = ref(false)
+
+function submitTyped(): void {
+  const hz = parseFrequency(typed.value)
+  if (hz === null) {
+    typedBad.value = true
+    return
+  }
+  typedBad.value = false
+  typed.value = ''
+  goTo(hz)
 }
 
 /** Put the listening point back on the middle of the window. */
@@ -81,11 +211,6 @@ const ROLLS = [
 
 const rolling = ref(false)
 const found = ref<{ name: string; note: string } | null>(null)
-
-const centerHz = computed({
-  get: () => node.value?.params.centerHz ?? 0,
-  set: (v: number) => void devices.configure(props.deviceId, { centerHz: v }),
-})
 
 const params = computed(() => node.value?.descriptor.params ?? [])
 
@@ -125,29 +250,26 @@ const gains = computed(() => params.value.filter((p) => GAINS.includes(p.key)))
 // so the number at that end is not the gain the radio is running.
 function readout(p: ParamSpec): string {
   const v = node.value?.params[p.key] ?? p.default
+  if (p.topLabel && v >= p.max) return p.topLabel
   if (p.key === 'gain' && v >= p.max) return 'auto'
+  const named = p.choiceLabels?.[p.choices?.indexOf(v) ?? -1]
+  if (named !== undefined) return named
   return p.unit ? `${v} ${p.unit}` : `${v}`
 }
 
-const centerSpec = computed(() => spec('centerHz'))
-
 function reachable(hz: number): boolean {
   const s = centerSpec.value
-  return !s || (hz >= s.min && hz <= s.max)
+  return !s || reaches(s, hz)
 }
 
 const bands = computed(() => BANDS.filter((b) => reachable(b.hz)))
 const unreachable = computed(() => BANDS.filter((b) => !reachable(b.hz)).map((b) => b.label))
 const pool = computed(() => ROLLS.filter((r) => reachable(r.hz)))
 
+/** Presets name a frequency, so they land on it with the listening point centred. */
 function tune(hz: number): void {
-  const s = centerSpec.value
-  centerHz.value = s ? Math.min(s.max, Math.max(s.min, hz)) : hz
-}
-
-function nudge(dir: number): void {
-  const step = rx.mode.value === 'am' ? 10e3 : 100e3
-  tune(centerHz.value + dir * step)
+  rx.setOffset(0)
+  centerHz.value = clampHz(hz)
 }
 
 function pickBand(b: (typeof BANDS)[number]): void {
@@ -166,6 +288,27 @@ function roll(): void {
   }, 500)
 }
 
+/**
+ * Power inside the listening band, and how far it stands over the noise in a
+ * band of the same width. A strong station elsewhere in the window does not
+ * move it.
+ */
+const channel = computed(() => {
+  const b = view.bins.value
+  if (!b || !span.value) return null
+  const n = b.length
+  const lo = (0.5 + (rx.offsetHz.value - rx.bandwidthHz.value / 2) / span.value) * n
+  const hi = (0.5 + (rx.offsetHz.value + rx.bandwidthHz.value / 2) / span.value) * n
+  const enbw = ENBW[view.windowKind.value] ?? ENBW.hann
+  const db = channelPower(b, lo, hi, enbw)
+  // averaged frames have lost the spread the median correction assumes.
+  const toMean = view.average.value > 1 ? 0 : MEDIAN_TO_MEAN_DB
+  const noise = noiseFloor(b) + toMean + 10 * Math.log10(Math.max(1, binsIn(lo, hi, n)) / enbw)
+  return { db, snr: db - noise, noise }
+})
+
+const zoomed = computed(() => view.view.value[1] - view.view.value[0] < 0.999)
+
 async function listen(): Promise<void> {
   await rx.start()
   // the sink is built by start(), so the knob's position is applied after it.
@@ -178,7 +321,10 @@ async function letGo(): Promise<void> {
 
 watch(
   () => rx.mode.value,
-  (m) => rx.applyMode(m),
+  (m) => {
+    rx.applyMode(m)
+    step.value = MODE_STEP[m]
+  },
 )
 
 watch(volume, (v) => rx.setVolume(v / 100))
@@ -192,8 +338,8 @@ onBeforeUnmount(() => {
   <div>
     <div class="bn-meta">
       <div>
-        <div class="bn-k">center</div>
-        <div class="bn-v is-pink">{{ formatHz(centerHz) }}</div>
+        <div class="bn-k">tuned</div>
+        <div class="bn-v">{{ formatHz(centerHz) }}</div>
       </div>
       <div>
         <div class="bn-k">rate</div>
@@ -207,13 +353,13 @@ onBeforeUnmount(() => {
         <div class="bn-k">{{ p.label }}</div>
         <div class="bn-v is-goo">{{ readout(p) }}</div>
       </div>
-      <div>
+      <div v-if="channel">
         <div class="bn-k">sig</div>
-        <div class="bn-v">{{ rx.signalDb.value.toFixed(0) }} dB</div>
+        <div class="bn-v">{{ channel.db.toFixed(0) }} dB</div>
       </div>
-      <div v-if="span">
-        <div class="bn-k">listening</div>
-        <div class="bn-v is-pink">{{ formatHz(listeningHz) }}</div>
+      <div v-if="channel">
+        <div class="bn-k">snr</div>
+        <div class="bn-v">{{ Math.max(0, channel.snr).toFixed(0) }} dB</div>
       </div>
       <div v-if="span">
         <div class="bn-k">width</div>
@@ -235,8 +381,8 @@ onBeforeUnmount(() => {
         :key="b.label"
         type="button"
         class="bn-pack"
-        :class="{ 'is-on': Math.abs(centerHz - b.hz) < 1000 }"
-        :aria-pressed="Math.abs(centerHz - b.hz) < 1000"
+        :class="{ 'is-on': Math.abs(listeningHz - b.hz) < 1000 }"
+        :aria-pressed="Math.abs(listeningHz - b.hz) < 1000"
         @click="pickBand(b)"
       >
         {{ b.label }}
@@ -249,11 +395,18 @@ onBeforeUnmount(() => {
     </p>
 
     <div class="bn-dial">
-      <div class="bn-digits">
-        {{ (centerHz / 1e6).toFixed(3) }}<small>MHz</small>
+      <div role="group" :aria-label="`listening at ${formatHz(listeningHz, 4)}`">
+        <HbDial
+          v-model="dialMhz"
+          :digits="dialDigits"
+          :decimals="4"
+          unit="MHz"
+          :min="(centerSpec?.min ?? 0) / 1e6"
+          :max="(centerSpec?.max ?? 1e12) / 1e6"
+        />
       </div>
-      <button class="bn-rbtn" type="button" aria-label="tune down" @click="nudge(-1)">&#9668;</button>
-      <button class="bn-rbtn" type="button" aria-label="tune up" @click="nudge(1)">&#9658;</button>
+      <button class="bn-rbtn" type="button" :aria-label="`down one step`" @click="stepBy(-1)">&#9668;</button>
+      <button class="bn-rbtn" type="button" :aria-label="`up one step`" @click="stepBy(1)">&#9658;</button>
       <HbButton size="sm" :loading="rolling" :disabled="!pool.length" @click="roll">
         <template #icon><HbIcon name="dice" /></template>
         surprise me
@@ -267,6 +420,29 @@ onBeforeUnmount(() => {
         stop
       </HbButton>
     </div>
+
+    <form class="bn-goto" @submit.prevent="submitTyped">
+      <label class="bn-klabel" :for="gotoId">go to</label>
+      <HbInput
+        :id="gotoId"
+        v-model="typed"
+        :invalid="typedBad"
+        placeholder="146.52"
+        inputmode="decimal"
+        autocomplete="off"
+        :aria-describedby="hintId"
+      />
+      <HbButton size="sm" type="submit">go</HbButton>
+      <label class="bn-klabel" :for="stepId">step</label>
+      <HbSelect :id="stepId" v-model="step" :options="STEPS" />
+    </form>
+    <p :id="hintId" class="bn-note" style="margin: 4px 0 0">
+      <template v-if="typedBad">that is not a frequency. try 146.52, 1090k or 7.2 mhz.</template>
+      <template v-else>
+        a bare number is mhz. the wheel over the trace moves one step, ctrl and the wheel
+        zooms, shift and the wheel pans.
+      </template>
+    </p>
 
     <p v-if="!pool.length" class="bn-note" style="margin-top: 0">
       surprise me is off: nothing on its list is inside what this radio tunes.
@@ -305,7 +481,11 @@ onBeforeUnmount(() => {
       <InstKnob v-for="p in knobs" :key="p.key" v-model="paramModel(p.key).value" :spec="p" />
     </div>
 
-    <InstSmeter :db="rx.signalDb.value" />
+    <InstSmeter
+      :db="channel?.db ?? -120"
+      :floor-db="channel?.noise ?? -90"
+      :ceil-db="(channel?.noise ?? -90) + 50"
+    />
 
     <p v-if="!streaming && !sim" class="bn-note" style="margin-top: 0">
       idle. nothing is being sampled until you press listen.
@@ -313,32 +493,62 @@ onBeforeUnmount(() => {
 
     <p v-if="span" class="bn-note" style="margin-bottom: 4px">
       click the trace or the waterfall to move where you are listening, drag the edges of
-      the lit band to widen or narrow it. the radio stays where it is tuned, this moves
-      inside the window it is already receiving.
+      the lit band to widen or narrow it. the radio stays where it is tuned until you step
+      past the edge of the window.
       <button v-if="rx.offsetHz.value" type="button" class="bn-linkish" @click="recentre">
         back to centre
+      </button>
+      <button v-if="zoomed" type="button" class="bn-linkish" @click="view.fit()">
+        zoom out
       </button>
     </p>
 
     <InstScope
-      :bins="stream.fft.value"
+      :bins="view.bins.value"
       :height="170"
       ruled
+      db-axis
+      :auto="false"
+      :min-db="view.minDb.value"
+      :max-db="view.maxDb.value"
       :demo="placeholder"
+      :view="view.view.value"
+      :low-hz="lowHz"
+      :high-hz="highHz"
       :marker="span ? marker : null"
       :marker-width="markerWidth"
       :interactive="!!span"
       @tune="tuneTo"
       @width="widthTo"
+      @step="stepBy"
+      @zoom="view.zoom"
+      @pan="view.pan"
     />
+    <InstFreqAxis
+      v-if="span"
+      :low-hz="lowHz"
+      :high-hz="highHz"
+      :view="view.view.value"
+      :marks="[marker]"
+      @pan="view.pan"
+      @zoom="view.zoom"
+    />
+    <InstBandStrip v-if="span" :low-hz="lowHz" :high-hz="highHz" :view="view.view.value" :bands="BAND_PLAN" />
     <InstWaterfall
-      :bins="stream.fft.value"
+      :bins="view.bins.value"
       :height="120"
+      :auto="false"
+      :min-db="view.minDb.value"
+      :max-db="view.maxDb.value"
       :demo="placeholder"
+      :view="view.view.value"
       :marker="span ? marker : null"
       :marker-width="markerWidth"
       :interactive="!!span"
       @tune="tuneTo"
+      @step="stepBy"
+      @zoom="view.zoom"
+      @pan="view.pan"
       style="margin-top: 8px"
     />
 

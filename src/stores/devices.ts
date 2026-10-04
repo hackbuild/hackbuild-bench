@@ -3,6 +3,40 @@ import { computed, ref, shallowRef, triggerRef } from 'vue'
 import { bus } from '@/core/bus/DeviceBus'
 import type { Capability } from '@/core/capabilities'
 import type { DeviceNode, TransportKind } from '@/core/types'
+import type { DeviceHandle } from '@/core/drivers/types'
+
+const MEMORY_KEY = 'hackbuild.bench.units'
+
+type UnitMemory = Record<string, Record<string, number>>
+
+function loadMemory(): UnitMemory {
+  try {
+    const raw = localStorage.getItem(MEMORY_KEY)
+    if (raw) return JSON.parse(raw) as UnitMemory
+  } catch {
+    // corrupt or unavailable storage starts empty.
+  }
+  return {}
+}
+
+/**
+ * Cheap sticks share serials, every unmodified RTL2832U says 00000001, so the
+ * tuner the driver found is part of the key. Two identical sticks still share
+ * one memory, since nothing the browser can read tells them apart.
+ */
+function unitKey(node: DeviceNode): string {
+  const chip = node.info.tuner ? `:${node.info.tuner}` : ''
+  return `${node.kind}:${node.uid}${chip}`
+}
+
+/** The params this unit keeps between connects, with their current values. */
+function rememberedOf(node: DeviceNode): Record<string, number> {
+  const out: Record<string, number> = {}
+  for (const p of node.descriptor.params) {
+    if (p.remember && node.params[p.key] !== undefined) out[p.key] = node.params[p.key]
+  }
+  return out
+}
 
 /**
  * Reactive mirror of the device bus.
@@ -17,6 +51,24 @@ export const useDevices = defineStore('devices', () => {
   const connecting = ref(false)
   const lastError = ref<string | null>(null)
   const logs = ref<Array<{ deviceId: string; message: string; at: number }>>([])
+  const memory = loadMemory()
+
+  function remember(id: string): void {
+    const node = bus.node(id)
+    if (!node) return
+    const values = rememberedOf(node)
+    if (!Object.keys(values).length) return
+    const key = unitKey(node)
+    const was = memory[key]
+    // a sweep fires a params event per hop, and none of them touch a remembered value.
+    if (was && Object.keys(values).every((k) => was[k] === values[k])) return
+    memory[key] = values
+    try {
+      localStorage.setItem(MEMORY_KEY, JSON.stringify(memory))
+    } catch {
+      // private browsing. the unit starts from defaults next time.
+    }
+  }
 
   /**
    * The bus mutates its nodes in place and knows nothing about Vue, so each
@@ -35,6 +87,7 @@ export const useDevices = defineStore('devices', () => {
       if (logs.value.length > 500) logs.value.splice(0, logs.value.length - 500)
     }
     if (e.type === 'error' && e.message) lastError.value = e.message
+    if (e.type === 'params') remember(e.deviceId)
     sync()
   })
 
@@ -64,8 +117,7 @@ export const useDevices = defineStore('devices', () => {
     try {
       const handle = await bus.requestAccess(kind, transport, fields)
       if (!handle) return null
-      const node = await bus.attach(handle)
-      sync()
+      const node = await attach(handle)
       focusId.value = node.id
       return node
     } catch (err) {
@@ -77,6 +129,19 @@ export const useDevices = defineStore('devices', () => {
       connecting.value = false
       sync()
     }
+  }
+
+  /** Puts a chosen device on the bus with whatever this unit remembered from last time. */
+  async function attach(handle: DeviceHandle): Promise<DeviceNode> {
+    const node = await bus.attach(handle)
+    const stored = memory[unitKey(node)]
+    if (stored) {
+      const known = new Set(Object.keys(rememberedOf(node)))
+      const restore = Object.fromEntries(Object.entries(stored).filter(([k]) => known.has(k)))
+      if (Object.keys(restore).length) await configure(node.id, restore)
+    }
+    sync()
+    return node
   }
 
   async function disconnect(id: string): Promise<void> {
@@ -137,6 +202,7 @@ export const useDevices = defineStore('devices', () => {
     providers,
     canProvide,
     connect,
+    attach,
     disconnect,
     configure,
     start,

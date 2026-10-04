@@ -18,7 +18,25 @@ export interface ParamSpec {
   choices?: number[]
   /** Render as a log scale control, used for frequency and sample rate. */
   log?: boolean
+  /**
+   * Kept per physical unit and restored on the next connect, for values that
+   * belong to that unit, like a crystal's ppm error. Never set on anything
+   * that powers, drives, or transmits, since a device opens passive.
+   */
+  remember?: boolean
+  /** Names for the choices, in the same order, when the numbers mean nothing alone. */
+  choiceLabels?: string[]
+  /** Shown in place of the number at the top of the range, where it means something else, like auto gain. */
+  topLabel?: string
+  /**
+   * For a range with holes in it, the parts that are reachable, lowest first.
+   * min and max still bound the whole thing.
+   */
+  spans?: Array<[number, number]>
 }
+
+/** The parts of a descriptor one connected unit can narrow after probing. */
+export type UnitDescription = Partial<Pick<DeviceDescriptor, 'params' | 'limits'>>
 
 /**
  * A value the connect dialog must collect before the driver can reach the
@@ -85,6 +103,12 @@ export interface DeviceNode {
   kind: string
   /** User editable, defaults to the descriptor name plus an index. */
   label: string
+  /** Stable per physical unit as far as the transport can tell, from the handle. */
+  uid: string
+  /**
+   * The driver descriptor, with params and limits narrowed to this unit when
+   * its session reports them. Panels read ranges from here.
+   */
   descriptor: DeviceDescriptor
   transport: TransportKind
   status: DeviceStatus

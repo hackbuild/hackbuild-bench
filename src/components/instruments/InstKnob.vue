@@ -34,6 +34,9 @@ const isFrequency = computed(() => (props.spec.unit ?? '').toLowerCase() === 'hz
 
 function format(value: number): string {
   if (!Number.isFinite(value)) return '--'
+  const named = props.spec.choiceLabels?.[props.spec.choices?.indexOf(value) ?? -1]
+  if (named !== undefined) return named
+  if (props.spec.topLabel && value >= props.spec.max) return props.spec.topLabel
   if (isFrequency.value) return `${(value / 1e6).toFixed(3)} MHz`
   const step = props.spec.step ?? 1
   const places = step >= 1 ? 0 : step >= 0.1 ? 1 : 2

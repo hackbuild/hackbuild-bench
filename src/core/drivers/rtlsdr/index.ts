@@ -1,7 +1,8 @@
 /**
- * RTL-SDR driver: RTL2832U demodulator with an R820T family tuner. That covers
- * the generic blue dongles, the RTL-SDR Blog v3, and every Nooelec NESDR Mini,
- * Nano and SMArt.
+ * RTL-SDR driver: an RTL2832U demodulator with whichever tuner the stick
+ * carries. librtlsdr supports six tuners, and so does this: the R820T family,
+ * the R828D, the E4000, the FC0012, the FC0013 and the FC2580. The tuner is
+ * probed at open, and the session reports the range and gains of the one found.
  *
  * Receive only. The dongle has no transmitter. Its bias tee gpio survives across
  * sessions and across other host applications, so reset clears it.
@@ -9,11 +10,24 @@
 
 import { CAPABILITIES } from '@/core/capabilities'
 import type { Capability } from '@/core/capabilities'
-import type { DeviceDescriptor, FftFrame, IqChunk, TransportKind } from '@/core/types'
+import type {
+  DeviceDescriptor,
+  FftFrame,
+  IqChunk,
+  ParamSpec,
+  TransportKind,
+  UnitDescription,
+} from '@/core/types'
 import type { DeviceDriver, DeviceHandle, DeviceSession, DriverContext } from '@/core/drivers/types'
 import { UsbPort } from '@/core/transport/webusb'
 import { SpectrumAnalyzer } from '@/core/dsp/fft'
-import { R820T } from './r820t'
+import { R82xx, R828D_XTAL } from './r82xx'
+import type { R82xxModel } from './r82xx'
+import { E4000 } from './e4000'
+import { FC0012 } from './fc0012'
+import { FC0013 } from './fc0013'
+import { FC2580 } from './fc2580'
+import type { Tuner, TunerHost } from './tuner'
 import { BLOCK, IF_FREQ, REG, RTL_DEVICES, RtlCom, XTAL } from './rtlcom'
 import type { RtlOp } from './rtlcom'
 
@@ -27,9 +41,6 @@ const XFER_DEPTH = 16
 const FFT_MIN_INTERVAL_MS = 1000 / 30
 
 const FFT_SIZE = 2048
-
-/** Above this the gain slider means let the tuner decide. */
-const GAIN_AUTO_AT = 49
 
 /** A transfer lands within milliseconds at every rate on offer, so this is dead. */
 const STREAM_STALL_MS = 3000
@@ -57,27 +68,53 @@ const USB_FILTERS: USBDeviceFilter[] = RTL_DEVICES.map(([vendorId, productId]) =
 /** The product string Realtek burns in when the maker left the eeprom alone. */
 const GENERIC_PRODUCT = /^rtl28\d\d/i
 
-interface TunerProbe {
-  name: string
-  addr: number
-  reg: number
-  match: (v: number) => boolean
-  afterReset?: boolean
-  note?: string
+/**
+ * Direct sampling feeds an adc straight from an hf input and lets the demod's
+ * own oscillator tune, so it reaches from here up to the adc clock. Past half
+ * the clock the band arrives mirrored.
+ */
+const HF_MIN = 500000
+const HF_MAX = XTAL
+
+/** librtlsdr's direct sampling modes. 1 is the i adc, 2 the q adc. */
+const HF_OFF = 0
+const HF_Q = 2
+
+/** Every rate the RTL2832U resampler takes. librtlsdr refuses 300 k to 900 k. */
+const RATES = [250000, 1024000, 1536000, 1800000, 2048000, 2400000, 2880000, 3200000]
+
+/** Strings that mark a board with its hf input wired to the q adc. */
+function hfWired(d: USBDevice): boolean {
+  return (
+    (d.manufacturerName === 'RTLSDRBlog' && d.productName === 'Blog V3') ||
+    /^nesdr smart v5/i.test(d.productName ?? '')
+  )
 }
 
+/** librtlsdr compares both strings exactly when it picks a board. */
+function isBoard(d: USBDevice, product: string): boolean {
+  return d.manufacturerName === 'RTLSDRBlog' && d.productName === product
+}
+
+type TunerKind = R82xxModel | 'e4000' | 'fc0012' | 'fc0013' | 'fc2580'
+
 /**
- * Tuners other than the R820T family, in the order librtlsdr probes them.
- * Found only so the refusal can name the chip. The last two answer only after
- * a reset pulse on gpio 4.
+ * What each Fitipower chip is rated to receive. Their plls program further
+ * than this, down to about 13 MHz and up to 1.9 GHz, and librtlsdr accepts it,
+ * but the front ends are not specified out there.
  */
-const OTHER_TUNERS: TunerProbe[] = [
-  { name: 'e4000', addr: 0xc8, reg: 0x02, match: (v) => v === 0x40, note: 'as on the nesdr xtr' },
-  { name: 'fc0013', addr: 0xc6, reg: 0x00, match: (v) => v === 0xa3 },
-  { name: 'r828d', addr: 0x74, reg: 0x00, match: (v) => v === 0x69, note: 'as on the rtl-sdr blog v4' },
-  { name: 'fc2580', addr: 0xac, reg: 0x01, match: (v) => (v & 0x7f) === 0x56, afterReset: true },
-  { name: 'fc0012', addr: 0xc6, reg: 0x00, match: (v) => v === 0xa1, afterReset: true },
-]
+const RATED: Partial<Record<TunerKind, [number, number]>> = {
+  fc0012: [22e6, 948.6e6],
+  fc0013: [22e6, 1100e6],
+}
+
+/** Keeps the parts of each span inside the rating. */
+function within(spans: Array<[number, number]>, rated?: [number, number]): Array<[number, number]> {
+  if (!rated) return spans
+  return spans
+    .map(([lo, hi]): [number, number] => [Math.max(lo, rated[0]), Math.min(hi, rated[1])])
+    .filter(([lo, hi]) => hi > lo)
+}
 
 /**
  * The RTL2832U bring up sequence. The 0x1c to 0x2f run is the demod fir
@@ -131,21 +168,27 @@ const INIT_OPS: RtlOp[] = [
 ]
 
 // ---------------------------------------------------------------------------
+// ---------------------------------------------------------------------------
 // hardware
 // ---------------------------------------------------------------------------
 
 class RtlSdr {
   readonly port: UsbPort
   readonly com: RtlCom
-  tuner: R820T | null = null
-  tunerName = ''
+  tuner: Tuner | null = null
+  kind: TunerKind | null = null
   ppm = 0
   rate = 0
   freq = 100000000
+  /** 0 off, 1 the i adc, 2 the q adc, used below the tuner's range. */
+  hf = HF_OFF
+  /** True while the demod is sampling the hf input instead of the tuner. */
+  direct = false
+  biasTee = false
   /** The frequency asked for, before the pll rounds it. Null until the first tune. */
   private wantHz: number | null = null
-  /** Where the tuner parks the signal for the demod. It moves with the sample rate. */
-  private ifHz = IF_FREQ
+  /** Tenths of a dB, or null for the tuner's agc. Reapplied when the tuner is reinitialised. */
+  private gain: number | null = null
   /** False when the pll did not report lock at the last tune. */
   tunerLocked = true
 
@@ -156,6 +199,21 @@ class RtlSdr {
 
   private correctedXtal(): number {
     return Math.floor(XTAL * (1 + this.ppm / 1e6))
+  }
+
+  /** A plain R828D has its own crystal, every other tuner runs from the RTL2832U's. */
+  private tunerXtal(): number {
+    const base = this.kind === 'r828d' ? R828D_XTAL : XTAL
+    return Math.floor(base * (1 + this.ppm / 1e6))
+  }
+
+  private host(): TunerHost {
+    return {
+      com: this.com,
+      xtal: this.tunerXtal(),
+      setGpioOutput: (bit) => this.setGpioOutput(bit),
+      setGpioBit: (bit, on) => this.setGpioBit(bit, on),
+    }
   }
 
   async open(ppm: number): Promise<void> {
@@ -175,22 +233,25 @@ class RtlSdr {
 
     await com.i2cOpen()
     try {
-      if (!(await R820T.detect(com))) throw new Error(await this.unsupportedTuner())
-      const d = this.port.device
-      // the v4 lite answers as an r820t but needs a different vco reference
-      // and an input switch, so tuning it as one lands off frequency.
-      if (d.manufacturerName === 'RTLSDRBlog' && d.productName === 'Blog V4L') {
-        throw new Error('the rtl-sdr blog v4 lite needs its own tuner handling, which is not written yet.')
+      this.kind = await this.probe()
+      if (!this.kind) {
+        throw new Error(
+          'no tuner answered on the i2c bus. unplug the dongle, plug it back in, and connect again.',
+        )
       }
-      this.tuner = new R820T(com, this.correctedXtal())
-      this.tunerName = 'r820t/r820t2'
-      await com.writeEach([
-        ['demod', 1, 0xb1, 0x1a, 1],
-        ['demod', 0, 0x08, 0x4d, 1],
-      ])
-      await this.setIfFreq(IF_FREQ)
-      await com.writeDemod(1, 0x15, 0x01, 1)
+      this.tuner = this.makeTuner(this.kind)
+      if (this.tuner.lowIf) {
+        await com.writeEach([
+          ['demod', 1, 0xb1, 0x1a, 1],
+          ['demod', 0, 0x08, 0x4d, 1],
+        ])
+        await this.setIfFreq(IF_FREQ)
+        await com.writeDemod(1, 0x15, 0x01, 1)
+      }
       await this.tuner.init()
+      // a bias tee left on by another program or a crashed tab outlives the
+      // port, and the knob opens reading off.
+      await this.clearBiasTee()
     } finally {
       try {
         await com.i2cClose()
@@ -201,23 +262,67 @@ class RtlSdr {
     }
   }
 
-  /** Names whatever tuner answered instead, for the refusal. The i2c gate is open. */
-  private async unsupportedTuner(): Promise<string> {
-    let reset = false
-    for (const t of OTHER_TUNERS) {
-      if (t.afterReset && !reset) {
-        await this.setGpioOutput(4)
-        await this.setGpioBit(4, true)
-        await this.setGpioBit(4, false)
-        reset = true
-      }
-      const v = await this.com.i2cProbe(t.addr, t.reg)
-      if (v !== null && t.match(v)) {
-        const note = t.note ? `, ${t.note}` : ''
-        return `this dongle has an ${t.name} tuner${note}. only the r820t family is supported so far.`
-      }
+  /** librtlsdr's probe order. The FC2580 and FC0012 answer only after a reset pulse on gpio 4. */
+  private async probe(): Promise<TunerKind | null> {
+    const com = this.com
+    const d = this.port.device
+    if ((await com.i2cProbe(0xc8, 0x02)) === 0x40) return 'e4000'
+    if ((await com.i2cProbe(0xc6, 0x00)) === 0xa3) return 'fc0013'
+    const r82 = await R82xx.detect(com)
+    if (r82 === 'r820t') return isBoard(d, 'Blog V4L') ? 'blog-v4-lite' : 'r820t'
+    if (r82 === 'r828d') return isBoard(d, 'Blog V4') ? 'blog-v4' : 'r828d'
+    await this.setGpioOutput(4)
+    await this.setGpioBit(4, true)
+    await this.setGpioBit(4, false)
+    const fc2580 = await com.i2cProbe(0xac, 0x01)
+    if (fc2580 !== null && (fc2580 & 0x7f) === 0x56) return 'fc2580'
+    if ((await com.i2cProbe(0xc6, 0x00)) === 0xa1) return 'fc0012'
+    return null
+  }
+
+  private makeTuner(kind: TunerKind): Tuner {
+    const host = this.host()
+    switch (kind) {
+      case 'e4000':
+        return new E4000(host)
+      case 'fc0012':
+        return new FC0012(host)
+      case 'fc0013':
+        return new FC0013(host)
+      case 'fc2580':
+        return new FC2580(host)
+      default:
+        return new R82xx(host, kind)
     }
-    return 'no tuner answered on the i2c bus. unplug the dongle, plug it back in, and connect again.'
+  }
+
+  get tunerName(): string {
+    return this.tuner?.name ?? 'none'
+  }
+
+  /** The Blog v4 boards reach hf through their own upconverter instead. */
+  get hfCapable(): boolean {
+    return this.kind !== 'blog-v4' && this.kind !== 'blog-v4-lite'
+  }
+
+  /** Every span the stick can tune with the current hf setting, lowest first. */
+  /** The tuner's own spans, cut to its rating. */
+  tunerRanges(): Array<[number, number]> {
+    return within(this.tuner?.ranges ?? [], this.kind ? RATED[this.kind] : undefined)
+  }
+
+  ranges(): Array<[number, number]> {
+    const tuned = this.tunerRanges()
+    if (this.hf === HF_OFF || !this.hfCapable || !tuned.length) return tuned
+    return [[HF_MIN, HF_MAX] as [number, number], ...tuned].reduce<Array<[number, number]>>(
+      (out, r) => {
+        const last = out[out.length - 1]
+        if (last && r[0] <= last[1]) last[1] = Math.max(last[1], r[1])
+        else out.push([r[0], r[1]])
+        return out
+      },
+      [],
+    )
   }
 
   async setIfFreq(hz: number): Promise<void> {
@@ -230,6 +335,17 @@ class RtlSdr {
     ])
   }
 
+  private async gated<T>(fn: (t: Tuner) => Promise<T>): Promise<T> {
+    if (!this.tuner) throw new Error('tuner is not initialised')
+    const tuner = this.tuner
+    await this.com.i2cOpen()
+    try {
+      return await fn(tuner)
+    } finally {
+      await this.com.i2cClose()
+    }
+  }
+
   /** Returns the rate the resampler actually lands on, which is what dsp uses. */
   async setSampleRate(rate: number): Promise<number> {
     // the ratio register is 28 bits with bit 27 acting as a sign, which is what
@@ -237,15 +353,16 @@ class RtlSdr {
     const ratio = Math.floor((XTAL * 4194304) / rate) & 0x0ffffffc
     const realRatio = ratio | ((ratio & 0x08000000) << 1)
     const real = (XTAL * 4194304) / realRatio
-    if (this.tuner) {
-      await this.com.i2cOpen()
+    this.rate = real
+    // the resampler has to follow the rate even when the retune inside the
+    // bandwidth step fails, or samples go out labelled with the wrong rate.
+    let failed: unknown = null
+    if (this.tuner && !this.direct) {
       try {
-        this.ifHz = await this.tuner.setBandwidth(Math.floor(real))
-      } finally {
-        await this.com.i2cClose()
+        await this.applyBandwidth()
+      } catch (err) {
+        failed = err
       }
-      await this.setIfFreq(this.ifHz)
-      if (this.wantHz !== null) await this.setCenterFrequency(this.wantHz)
     }
     const off = Math.trunc((-this.ppm * 16777216) / 1e6)
     await this.com.writeEach([
@@ -256,36 +373,114 @@ class RtlSdr {
       ['demod', 1, 0x01, 0x14, 1],
       ['demod', 1, 0x01, 0x10, 1],
     ])
-    this.rate = real
+    if (failed) throw failed
     return real
   }
 
-  /** The tuner is parked the if above, since the demod shifts it back down. */
-  async setCenterFrequency(hz: number): Promise<number> {
-    if (!this.tuner) throw new Error('tuner is not initialised')
-    await this.com.i2cOpen()
-    let actual: number | null
-    try {
-      actual = await this.tuner.setFrequency(hz + this.ifHz)
-    } finally {
-      await this.com.i2cClose()
-    }
-    this.tunerLocked = this.tuner.pllLock
-    if (actual === null) throw new Error(`the tuner cannot reach ${Math.round(hz)} hz`)
-    this.wantHz = hz
-    this.freq = actual - this.ifHz
-    return this.freq
+  /** Fits the tuner's filter to the rate and moves the demod if with it, as librtlsdr's set_bw does. */
+  private async applyBandwidth(): Promise<void> {
+    const ifHz = await this.gated((t) => t.setBandwidth(Math.floor(this.rate)))
+    if (ifHz !== null) await this.setIfFreq(ifHz)
+    if (this.wantHz !== null) await this.setCenterFrequency(this.wantHz)
   }
 
-  async setGain(db: number | null): Promise<void> {
+  /**
+   * Below the tuner's range on a stick with an hf input this switches to
+   * direct sampling, and back above it, the way the RTL-SDR Blog driver does.
+   */
+  async setCenterFrequency(hz: number): Promise<number> {
     if (!this.tuner) throw new Error('tuner is not initialised')
-    await this.com.i2cOpen()
-    try {
-      if (db === null) await this.tuner.setAutoGain()
-      else await this.tuner.setManualGain(db)
-    } finally {
-      await this.com.i2cClose()
+    const ranges = this.ranges()
+    if (!ranges.some(([lo, hi]) => hz >= lo && hz <= hi)) {
+      const spans = ranges.map(([lo, hi]) => `${fmtMhz(lo)} to ${fmtMhz(hi)}`).join(', ')
+      throw new Error(`the ${this.tunerName} cannot tune ${fmtMhz(hz)}. it covers ${spans}.`)
     }
+    const wantDirect =
+      this.hf !== HF_OFF && this.hfCapable && hz < this.tunerRanges()[0][0] && hz <= HF_MAX
+    if (wantDirect !== this.direct) await this.setDirect(wantDirect)
+    if (this.direct) {
+      await this.setIfFreq(hz)
+      this.wantHz = hz
+      this.tunerLocked = true
+      this.freq = hz
+      return hz
+    }
+    const actual = await this.gated((t) => t.setFrequency(hz))
+    this.tunerLocked = this.tuner.pllLock
+    if (actual === null) throw new Error(`the ${this.tunerName} would not lock at ${fmtMhz(hz)}`)
+    this.wantHz = hz
+    this.freq = actual
+    return actual
+  }
+
+  /** librtlsdr's set_direct_sampling, with the tuner's filter and gain put back on the way out. */
+  private async setDirect(on: boolean): Promise<void> {
+    const tuner = this.tuner
+    if (!tuner) return
+    if (on) {
+      await this.gated((t) => t.shutdown())
+      // the tuner is in standby from here, so a failure below must not leave
+      // the next tune thinking it is live.
+      this.direct = true
+      await this.com.writeEach([
+        ['demod', 1, 0xb1, 0x1a, 1],
+        ['demod', 1, 0x15, 0x00, 1],
+        ['demod', 0, 0x08, 0x4d, 1],
+        ['demod', 0, 0x06, this.hf === HF_Q ? 0x90 : 0x80, 1],
+      ])
+      return
+    }
+    await this.gated((t) => t.init())
+    if (tuner.lowIf) {
+      await this.setIfFreq(IF_FREQ)
+      await this.com.writeDemod(1, 0x15, 0x01, 1)
+    } else {
+      await this.setIfFreq(0)
+      await this.com.writeEach([
+        ['demod', 0, 0x08, 0xcd, 1],
+        ['demod', 1, 0xb1, 0x1b, 1],
+      ])
+    }
+    await this.com.writeDemod(0, 0x06, 0x80, 1)
+    this.direct = false
+    const want = this.wantHz
+    this.wantHz = null
+    try {
+      await this.applyBandwidth()
+    } finally {
+      // init put the tuner back at its own gain, which the knob no longer shows.
+      this.wantHz = want
+      await this.setGain(this.gain)
+    }
+  }
+
+  /** Changing which adc carries hf takes effect at once when it is already in use. */
+  async setHf(mode: number): Promise<void> {
+    if (mode === HF_OFF && this.direct) {
+      throw new Error(`tune above ${fmtMhz(this.tunerRanges()[0]?.[0] ?? 0)} before turning hf off`)
+    }
+    this.hf = mode
+    if (this.direct) await this.com.writeDemod(0, 0x06, mode === HF_Q ? 0x90 : 0x80, 1)
+  }
+
+  /**
+   * The knob in dB to what the tuner is told. One past the top manual step is
+   * the agc on a tuner that has one, and the rest snaps to the nearest step
+   * librtlsdr lists.
+   */
+  gainFor(db: number): number | null {
+    const gains = this.tuner?.gains ?? []
+    if (!gains.length) return null
+    const top = Math.ceil(gains[gains.length - 1] / 10)
+    if (this.tuner?.agc && db > top) return null
+    const want = db * 10
+    return gains.reduce((best, g) => (Math.abs(g - want) < Math.abs(best - want) ? g : best))
+  }
+
+  async setGain(tenths: number | null): Promise<void> {
+    this.gain = tenths
+    if (this.direct || !this.tuner?.gains.length) return
+    await this.gated((t) => t.setGain(tenths))
   }
 
   async setDigitalAgc(on: boolean): Promise<void> {
@@ -295,8 +490,9 @@ class RtlSdr {
   /** The sample rate step retunes the if and the centre against the corrected crystal. */
   async setPpm(ppm: number): Promise<void> {
     this.ppm = ppm
-    this.tuner?.setXtal(this.correctedXtal())
+    this.tuner?.setXtal(this.tunerXtal())
     await this.setSampleRate(this.rate)
+    if (this.direct && this.wantHz !== null) await this.setIfFreq(this.wantHz)
   }
 
   async setGpioOutput(bit: number): Promise<void> {
@@ -313,12 +509,19 @@ class RtlSdr {
     await this.com.writeReg(BLOCK.SYS, REG.GPO, val ? r | m : r & ~m, 1)
   }
 
+  /** librtlsdr's bias tee, gpio 0 on every board that has one. */
+  async setBiasTee(on: boolean): Promise<void> {
+    await this.setGpioOutput(0)
+    await this.setGpioBit(0, on)
+    this.biasTee = on
+  }
+
   /**
-   * The bias tee is gpio 0 on boards that have one. A pin nothing has made an
-   * output cannot be powering it, and on other boards it may be an input, so
-   * it is left alone.
+   * A pin nothing has made an output cannot be powering a bias tee, and on
+   * boards without one gpio 0 may be an input, so it is left alone.
    */
   async clearBiasTee(): Promise<void> {
+    this.biasTee = false
     const oe = await this.com.readReg(BLOCK.SYS, REG.GPOE, 1)
     if (!(oe & 1)) return
     await this.setGpioBit(0, false)
@@ -341,12 +544,7 @@ class RtlSdr {
     }
     if (this.tuner) {
       try {
-        await this.com.i2cOpen()
-        try {
-          await this.tuner.shutdown()
-        } finally {
-          await this.com.i2cClose()
-        }
+        await this.gated((t) => t.shutdown())
       } catch {
         // already unplugged. the rest of the teardown is still worth attempting.
       }
@@ -361,7 +559,10 @@ class RtlSdr {
   }
 }
 
-// ---------------------------------------------------------------------------
+function fmtMhz(hz: number): string {
+  return `${Number((hz / 1e6).toFixed(3))} mhz`
+}
+
 // session
 // ---------------------------------------------------------------------------
 
@@ -385,17 +586,27 @@ class RtlSession implements DeviceSession {
   private queue: Promise<unknown> = Promise.resolve()
   private applied: Record<string, number> = {}
 
+  private hfDefault: number
+
   constructor(
     sdr: RtlSdr,
     ctx: DriverContext,
     info: Record<string, string>,
     applied: Record<string, number>,
+    hfDefault: number,
   ) {
     this.sdr = sdr
     this.ctx = ctx
     this.info = info
     this.applied = applied
+    this.hfDefault = hfDefault
   }
+
+  describe(): UnitDescription {
+    return { params: paramsFor(this.sdr, this.hfDefault), limits: limitsFor(this.sdr) }
+  }
+
+
 
   private serial<T>(fn: () => Promise<T>): Promise<T> {
     const run = this.queue.then(fn, fn)
@@ -411,30 +622,70 @@ class RtlSession implements DeviceSession {
     return this.info
   }
 
+  /**
+   * Runs one setting. A failure can leave the radio between the old value and
+   * the new one, so what was applied before is no longer known, and the next
+   * configure must send it again even though the panel shows it unchanged.
+   */
+  private async apply(keys: string[], fn: () => Promise<void>): Promise<void> {
+    try {
+      await fn()
+    } catch (err) {
+      for (const k of keys) this.applied[k] = Number.NaN
+      throw err
+    }
+  }
+
   async configure(params: Record<string, number>): Promise<void> {
     await this.serial(async () => {
       if (params.ppm !== undefined && params.ppm !== this.applied.ppm) {
-        await this.sdr.setPpm(params.ppm)
+        // a ppm change retunes, so the centre is in doubt when it fails too.
+        await this.apply(['ppm', 'centerHz'], () => this.sdr.setPpm(params.ppm))
         this.applied.ppm = params.ppm
       }
       if (params.sampleRate !== undefined && params.sampleRate !== this.applied.sampleRate) {
-        const real = await this.sdr.setSampleRate(params.sampleRate)
+        let real = 0
+        await this.apply(['sampleRate', 'centerHz'], async () => {
+          real = await this.sdr.setSampleRate(params.sampleRate)
+        })
         this.applied.sampleRate = params.sampleRate
         this.info.sampleRate = `${Math.round(real)} sps`
         this.ctx.setInfo({ sampleRate: this.info.sampleRate })
       }
+      const hfChange = params.hf !== undefined && params.hf !== this.applied.hf && this.sdr.hfCapable
+      // turning hf off is refused below the tuner, so a retune in the same call goes first.
+      const centreFirst = hfChange && params.hf === HF_OFF && this.sdr.direct
+      if (hfChange && !centreFirst) {
+        await this.sdr.setHf(params.hf)
+        this.applied.hf = params.hf
+      }
       if (params.centerHz !== undefined && params.centerHz !== this.applied.centerHz) {
-        await this.sdr.setCenterFrequency(params.centerHz)
+        const wasDirect = this.sdr.direct
+        await this.apply(['centerHz'], async () => {
+          await this.sdr.setCenterFrequency(params.centerHz)
+        })
         this.applied.centerHz = params.centerHz
-        this.info.pll = this.sdr.tunerLocked ? 'locked' : 'no lock'
+        this.info.pll = this.sdr.direct ? 'direct sampling' : this.sdr.tunerLocked ? 'locked' : 'no lock'
         this.ctx.setInfo({ pll: this.info.pll })
+        if (wasDirect !== this.sdr.direct) {
+          this.ctx.log(this.sdr.direct ? 'below the tuner, sampling the hf input directly' : 'back on the tuner')
+        }
         if (!this.sdr.tunerLocked) {
           this.ctx.log(`tuner pll did not lock at ${Math.round(params.centerHz)} hz`)
         }
       }
+      if (centreFirst) {
+        await this.sdr.setHf(params.hf)
+        this.applied.hf = params.hf
+      }
       if (params.gain !== undefined && params.gain !== this.applied.gain) {
-        await this.sdr.setGain(params.gain >= GAIN_AUTO_AT ? null : params.gain)
+        await this.apply(['gain'], () => this.sdr.setGain(this.sdr.gainFor(params.gain)))
         this.applied.gain = params.gain
+      }
+      if (params.biasTee !== undefined && params.biasTee !== this.applied.biasTee) {
+        await this.sdr.setBiasTee(params.biasTee === 1)
+        this.applied.biasTee = params.biasTee
+        this.ctx.log(params.biasTee === 1 ? 'bias tee on, the antenna port now carries dc' : 'bias tee off')
       }
     })
   }
@@ -606,6 +857,118 @@ class RtlSession implements DeviceSession {
 // driver
 // ---------------------------------------------------------------------------
 
+/**
+ * The knobs for one stick. With no stick it describes the common R820T case,
+ * which is what the connect list and the simulated twin show.
+ */
+/** Where a stick opens: FM broadcast if the tuner reaches it, else the reachable point nearest it. */
+const HOME_HZ = 100.3e6
+
+function homeFor(ranges: Array<[number, number]>): number {
+  let best = HOME_HZ
+  let gap = Infinity
+  for (const [lo, hi] of ranges) {
+    const at = Math.min(hi, Math.max(lo, HOME_HZ))
+    if (Math.abs(at - HOME_HZ) < gap) {
+      gap = Math.abs(at - HOME_HZ)
+      best = at
+    }
+  }
+  return best
+}
+
+function paramsFor(sdr: RtlSdr | null, hfDefault = HF_OFF): ParamSpec[] {
+  const ranges = sdr?.ranges() ?? [[24e6, 1766e6]]
+  const gains = sdr ? (sdr.tuner?.gains ?? []) : [0, 496]
+  const params: ParamSpec[] = [
+    {
+      key: 'centerHz',
+      label: 'center',
+      unit: 'Hz',
+      min: ranges[0][0],
+      max: ranges[ranges.length - 1][1],
+      step: 1000,
+      default: homeFor(sdr?.tunerRanges() ?? ranges),
+      log: true,
+      spans: ranges.length > 1 ? ranges : undefined,
+    },
+    {
+      key: 'sampleRate',
+      label: 'sample rate',
+      unit: 'sps',
+      min: RATES[0],
+      max: RATES[RATES.length - 1],
+      choices: RATES,
+      default: 2400000,
+    },
+  ]
+  if (gains.length) {
+    const top = Math.ceil(gains[gains.length - 1] / 10)
+    const agc = sdr?.tuner?.agc ?? true
+    // one past the top manual step hands gain to the tuner's agc, where there is one.
+    params.push({
+      key: 'gain',
+      label: 'gain',
+      unit: 'dB',
+      min: Math.floor(gains[0] / 10),
+      max: agc ? top + 1 : top,
+      step: 1,
+      default: agc ? top + 1 : top,
+      topLabel: agc ? 'auto' : undefined,
+    })
+  }
+  params.push({ key: 'ppm', label: 'ppm', min: -100, max: 100, step: 1, default: 0, remember: true })
+  if (!sdr || sdr.hfCapable) {
+    params.push({
+      key: 'hf',
+      label: 'hf input',
+      min: 0,
+      max: 2,
+      choices: [HF_OFF, 1, HF_Q],
+      choiceLabels: ['off', 'i adc', 'q adc'],
+      default: hfDefault,
+      remember: true,
+    })
+  }
+  params.push(
+    {
+      key: 'biasTee',
+      label: 'bias tee',
+      min: 0,
+      max: 1,
+      choices: [0, 1],
+      choiceLabels: ['off', 'on'],
+      default: 0,
+    },
+    { key: 'squelch', label: 'squelch', unit: 'dB', min: -100, max: 0, step: 1, default: -100 },
+    { key: 'volume', label: 'volume', min: 0, max: 100, step: 1, default: 72 },
+  )
+  return params
+}
+
+function limitsFor(sdr: RtlSdr | null): DeviceDescriptor['limits'] {
+  const name = sdr?.tunerName ?? 'r820t'
+  const spans = (sdr?.ranges() ?? [[24e6, 1766e6]])
+    .map(([lo, hi]) => `${fmtMhz(lo)} to ${fmtMhz(hi)}`)
+    .join(' and ')
+  let hf = ''
+  if (sdr && !sdr.hfCapable) {
+    hf = ' below 28.8 mhz it switches to its upconverter and hf input on its own.'
+  } else if (sdr?.hf) {
+    hf = ` below ${fmtMhz(sdr.tunerRanges()[0]?.[0] ?? 24e6)} it samples the hf input directly. that only hears anything on a stick wired for it, like the rtl-sdr blog v3 or the nesdr smart v5.`
+  } else {
+    hf = ' hf below that needs direct sampling. set the hf input knob if this stick has an hf input.'
+  }
+  // librtlsdr runs this tuner from a fixed 16.384 mhz figure, so ppm only reaches the demod.
+  const xtal = sdr?.kind === 'fc2580' ? ' the ppm knob corrects the demod only, the fc2580 runs on its own crystal.' : ''
+  return {
+    [CAPABILITIES.OBSERVE_SPECTRUM]: `the ${name} tunes ${spans}.${hf}${xtal} 2.4 ghz work, wifi and ble included, cannot be done on this device.`,
+    [CAPABILITIES.CAPTURE_IQ]: `${spans}, 8 bit samples, and about 2.4 msps before the usb link starts dropping them.`,
+    [CAPABILITIES.AUDIO_DEMOD]:
+      'receive only, and one channel at a time within the tuned span. the dongle has no transmitter.',
+  }
+}
+
 const descriptor: DeviceDescriptor = {
   kind: 'rtlsdr',
   name: 'RTL-SDR',
@@ -617,40 +980,9 @@ const descriptor: DeviceDescriptor = {
     CAPABILITIES.CAPTURE_IQ,
     CAPABILITIES.AUDIO_DEMOD,
   ],
-  params: [
-    {
-      key: 'centerHz',
-      label: 'center',
-      unit: 'Hz',
-      min: 24e6,
-      max: 1766e6,
-      step: 1000,
-      default: 100.3e6,
-      log: true,
-    },
-    {
-      key: 'sampleRate',
-      label: 'sample rate',
-      unit: 'sps',
-      min: 2048000,
-      max: 3200000,
-      choices: [2048000, 2400000, 3200000],
-      default: 2400000,
-    },
-    { key: 'gain', label: 'gain', unit: 'dB', min: 0, max: 49, step: 1, default: 49 },
-    { key: 'ppm', label: 'ppm', min: -100, max: 100, step: 1, default: 0 },
-    { key: 'squelch', label: 'squelch', unit: 'dB', min: -100, max: 0, step: 1, default: -100 },
-    { key: 'volume', label: 'volume', min: 0, max: 100, step: 1, default: 72 },
-  ],
+  params: paramsFor(null),
   usbFilters: USB_FILTERS,
-  limits: {
-    [CAPABILITIES.OBSERVE_SPECTRUM]:
-      'tunes 24 mhz to 1.766 ghz. the r820t front end stops there, so 2.4 ghz work, wifi and ble included, cannot be done on this device.',
-    [CAPABILITIES.CAPTURE_IQ]:
-      'same 24 mhz to 1.766 ghz range, 8 bit samples, and about 2.4 msps before the usb link starts dropping them.',
-    [CAPABILITIES.AUDIO_DEMOD]:
-      'receive only, and one channel at a time within the tuned span. the dongle has no transmitter.',
-  },
+  limits: limitsFor(null),
 }
 
 function usbId(d: USBDevice): string {
@@ -700,13 +1032,16 @@ export const rtlsdrDriver: DeviceDriver = {
   async open(handle: DeviceHandle, ctx: DriverContext): Promise<DeviceSession> {
     const port = handle.raw as UsbPort
     const sdr = new RtlSdr(port)
-    const defaults = Object.fromEntries(descriptor.params.map((p) => [p.key, p.default]))
+    const hfDefault = hfWired(port.device) ? HF_Q : HF_OFF
+    let defaults: Record<string, number> = {}
     let rate: number
     let center: number
     try {
-      await sdr.open(defaults.ppm)
+      await sdr.open(0)
+      sdr.hf = sdr.hfCapable ? hfDefault : HF_OFF
+      defaults = Object.fromEntries(paramsFor(sdr, hfDefault).map((p) => [p.key, p.default]))
       rate = await sdr.setSampleRate(defaults.sampleRate)
-      await sdr.setGain(defaults.gain >= GAIN_AUTO_AT ? null : defaults.gain)
+      await sdr.setGain(defaults.gain === undefined ? null : sdr.gainFor(defaults.gain))
       center = await sdr.setCenterFrequency(defaults.centerHz)
     } catch (err) {
       // a claimed interface outlives a failed open, and the next connect
@@ -725,7 +1060,7 @@ export const rtlsdrDriver: DeviceDriver = {
       usb: usbId(d),
       sampleRate: `${Math.round(rate)} sps`,
     }
-    if (sdr.tuner && !sdr.tuner.calibrated) {
+    if (sdr.tuner instanceof R82xx && !sdr.tuner.calibrated) {
       info.filter = 'uncalibrated'
       ctx.log('tuner pll would not lock for filter calibration, running on the default filter')
     }
@@ -736,6 +1071,6 @@ export const rtlsdrDriver: DeviceDriver = {
         : `${sdr.tunerName} tuner pll did not lock at ${Math.round(center)} hz`,
     )
 
-    return new RtlSession(sdr, ctx, info, defaults)
+    return new RtlSession(sdr, ctx, info, defaults, hfDefault)
   },
 }

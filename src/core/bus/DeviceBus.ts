@@ -13,6 +13,12 @@ interface Live {
   driver: DeviceDriver
   abort: AbortController
   seq: number
+  /**
+   * Configure calls run one at a time, each merged against the params the
+   * last one left. Merged at call time instead, a knob moved while a sweep
+   * hop is in flight would carry the previous hop's frequency and undo it.
+   */
+  configuring: Promise<unknown>
 }
 
 /**
@@ -115,6 +121,7 @@ export class DeviceBus {
       id,
       kind: handle.kind,
       label,
+      uid: handle.uid,
       descriptor: driver.descriptor,
       transport: handle.transport,
       status: 'opening',
@@ -125,7 +132,7 @@ export class DeviceBus {
       connectedAt: Date.now(),
     }
 
-    const entry: Live = { node, session: null, driver, abort, seq: 0 }
+    const entry: Live = { node, session: null, driver, abort, seq: 0, configuring: Promise.resolve() }
     this.live.set(id, entry)
     this.fire({ type: 'attached', deviceId: id, at: Date.now() })
 
@@ -149,6 +156,9 @@ export class DeviceBus {
         throw new Error(`${node.label} was let go before it finished opening`)
       }
       entry.session = session
+      if (this.narrow(node, driver, session)) {
+        node.params = Object.fromEntries(node.descriptor.params.map((p) => [p.key, p.default]))
+      }
       // the panel shows node.params from the descriptor defaults, so the session
       // has to hold those same values before the first knob move.
       try {
@@ -156,6 +166,11 @@ export class DeviceBus {
       } catch (err) {
         const why = err instanceof Error ? err.message : String(err)
         this.fire({ type: 'log', deviceId: id, message: `defaults not applied: ${why}`, at: Date.now() })
+      }
+      // the same holds for a detach that landed while the defaults went in.
+      if (abort.signal.aborted) {
+        await session.close().catch(() => undefined)
+        throw new Error(`${node.label} was let go before it finished opening`)
       }
       node.capabilities = session.getCapabilities()
       Object.assign(node.info, session.getInfo())
@@ -198,6 +213,21 @@ export class DeviceBus {
 
   async configure(id: string, params: Record<string, number>): Promise<void> {
     const entry = this.expectSession(id)
+    const run = entry.configuring.then(
+      () => this.applyParams(id, entry, params),
+      () => this.applyParams(id, entry, params),
+    )
+    entry.configuring = run.catch(() => undefined)
+    return run
+  }
+
+  private async applyParams(
+    id: string,
+    entry: Live & { session: DeviceSession },
+    params: Record<string, number>,
+  ): Promise<void> {
+    // queued behind a detach, the session is closed and the node is gone.
+    if (this.live.get(id) !== entry) return
     const prev = { ...entry.node.params }
     const next = { ...entry.node.params, ...params }
     try {
@@ -216,6 +246,7 @@ export class DeviceBus {
     }
     entry.node.params = next
     entry.node.error = undefined
+    this.narrow(entry.node, entry.driver, entry.session)
     this.fire({ type: 'params', deviceId: id, at: Date.now() })
   }
 
@@ -295,6 +326,14 @@ export class DeviceBus {
   // -------------------------------------------------------------------------
   // internals
   // -------------------------------------------------------------------------
+
+  /** Applies what the session says about this unit. True when it said anything. */
+  private narrow(node: DeviceNode, driver: DeviceDriver, session: DeviceSession): boolean {
+    const own = session.describe?.()
+    if (!own) return false
+    node.descriptor = { ...driver.descriptor, ...own }
+    return true
+  }
 
   private expect(id: string): Live {
     const entry = this.live.get(id)
