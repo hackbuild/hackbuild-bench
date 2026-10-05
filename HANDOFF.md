@@ -306,7 +306,9 @@ They embed librtlsdr code, see the license note below. To rebuild one:
   - Pressing inside the passband drags it from where it was held.
   - An outer edge resizes it.
   - Anywhere else jumps there.
-  - Alt skips snapping, and the cursor shows the zone.
+  - A drag never snaps, so the line goes wherever it is put. A click snaps
+    to the step while the tune tab's snap is on, and alt skips that.
+  - The cursor shows the zone.
   - The wheel accumulates trackpad deltas into notches. A sideways scroll,
     which is what macos makes of shift and the wheel, pans.
 - **Passband shape.** The marker takes a `band` of [low, high] around the

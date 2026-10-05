@@ -40,7 +40,8 @@ const NOTCH = 50
  *
  * Pressing inside the passband grabs it and drags it from where it was
  * held. Pressing an outer edge drags that edge. Pressing anywhere else jumps
- * there, and keeps following until release. Alt held turns snapping off. The
+ * there, and keeps following until release. A drag goes wherever the
+ * pointer goes. Only a click asks to snap, and alt held turns that off. The
  * wheel steps, ctrl or cmd with it zooms, shift with it pans, and alt with it
  * steps finely. Two fingers pinch.
  */
@@ -154,7 +155,7 @@ export function useTuningPointer(o: TuningPointerOptions) {
     const f = spanAt(ev.clientX)
     if (zone === 'low' || zone === 'high') o.onWidth(widthFor(zone, f))
     else if (zone === 'pick') o.onPick(f)
-    else o.onTune(f - grabOffset, !ev.altKey)
+    else o.onTune(f - grabOffset, false)
   }
 
   function onUp(ev: PointerEvent): void {

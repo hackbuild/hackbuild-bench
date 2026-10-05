@@ -125,7 +125,7 @@ const MODE_STEP: Record<DemodMode, number> = {
 }
 
 const step = ref<number>(MODE_STEP[rx.mode.value])
-/** A click or a drag lands on the step grid. Alt held skips it once. */
+/** A click lands on the step grid. Alt held skips it once. A drag never snaps. */
 const snap = ref(true)
 
 /** A tenth of the step, never under 10 Hz, for the fine keys and alt with the wheel. */
@@ -524,7 +524,7 @@ onBeforeUnmount(() => {
           class="bn-pack"
           :class="{ 'is-on': snap }"
           :aria-pressed="snap"
-          title="clicks and drags land on the step grid"
+          title="clicks land on the step grid"
           @click="snap = !snap"
         >
           snap
@@ -602,9 +602,10 @@ onBeforeUnmount(() => {
     />
 
     <p v-if="span" class="bn-note rx-help">
-      click to listen there, drag the lit band to move it, drag its edge to resize it. alt turns
-      snapping off. on the trace, the arrows step, shift with them steps by a tenth, and the
-      square brackets narrow and widen. the radio retunes once you step past the window.
+      click to listen there, drag the lit band to move it anywhere, drag its edge to resize it.
+      a click snaps to the step while snap is on, and alt skips it. on the trace, the arrows
+      step, shift with them steps by a tenth, and the square brackets narrow and widen. the
+      radio retunes once you step past the window.
       <button v-if="rx.offsetHz.value" type="button" class="bn-linkish" @click="recentre">back to centre</button>
     </p>
 
