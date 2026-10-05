@@ -8,10 +8,9 @@ import type { RadioSystem, TalkgroupEntry } from '../systems'
  *
  * Feed it decoded TSBK octets from a control channel and it maintains the
  * identifier table, resolves grants to frequencies, and reports live calls:
- * which talkgroup is active, on what frequency, from which radio, and whether
- * it is followable inside the current tuned window.
+ * which talkgroup is active, on what frequency, and from which radio.
  *
- * `c4fm.ts` turns IQ into those octets and `tsbk.ts` parses them, so this runs
+ * `receiver.ts` turns IQ into those octets and `tsbk.ts` parses them, so this runs
  * against a live control channel when a radio is streaming, and against the
  * demo generator otherwise. The frequency math and the call logic are the same
  * either way. Voice stays out of reach, LDU frames carry IMBE and this build
@@ -29,8 +28,6 @@ export interface TrunkCall {
   source?: number
   emergency: boolean
   encrypted: boolean
-  /** True when the frequency sits inside the tuned window, so audio is reachable. */
-  followable: boolean
   startedAt: number
   endedAt: number | null
 }
@@ -42,9 +39,6 @@ export interface TrunkHooks {
   onIdent(count: number): void
 }
 
-/** ±950 kHz of a 2.0 MHz usable window at 2.4 Msps, minus channel guard. */
-const USABLE_HALF_HZ = 943_750
-
 export class TrunkFollower {
   private table = new IdenTable()
   private system: RadioSystem
@@ -52,18 +46,12 @@ export class TrunkFollower {
   private hooks: TrunkHooks
   private active = new Map<number, TrunkCall>()
   private counter = 0
-  private centerHz = 0
   private calls: TrunkCall[] = []
 
   constructor(system: RadioSystem, hooks: TrunkHooks) {
     this.system = system
     this.hooks = hooks
     for (const tg of system.talkgroups) this.tgIndex.set(tg.id, tg)
-  }
-
-  /** The frequency the receiver is parked on, used for the window test. */
-  setCenter(hz: number): void {
-    this.centerHz = hz
   }
 
   get callLog(): TrunkCall[] {
@@ -99,7 +87,6 @@ export class TrunkFollower {
     }
 
     const tg = this.tgIndex.get(grant.talkgroup)
-    const followable = Math.abs(resolved.hz - this.centerHz) <= USABLE_HALF_HZ && resolved.slot === 0
 
     const call: TrunkCall = {
       id: `tg-${++this.counter}`,
@@ -112,7 +99,6 @@ export class TrunkFollower {
       source: grant.source,
       emergency: grant.emergency,
       encrypted: grant.encrypted || tg?.encrypted || false,
-      followable,
       startedAt: Date.now(),
       endedAt: null,
     }

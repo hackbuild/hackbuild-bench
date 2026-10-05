@@ -26,7 +26,27 @@ const ears = useTranscription(props.deviceId)
 
 const mode = ref<'conventional' | 'trunked'>('conventional')
 const selectedGroups = ref<string[]>(['weather', 'interop'])
-const threshold = ref(-70)
+/** How far over the noise floor a channel has to stand to count as busy, in dB. */
+const threshold = ref(10)
+/** The channel sits this far below the window centre, clear of the dc spike. */
+const OFFSET_HZ = 250_000
+/** The quietest a channel has read lately, which is the floor busy is judged against. */
+const floorDb = ref(Number.NaN)
+let tunedCenter = 0
+
+/**
+ * The listening slice's level over the floor. A reading still arriving from
+ * the last frequency counts as nothing, so it cannot open the wrong channel.
+ */
+function channelLevel(): number {
+  if (Math.abs(rx.channelCenterHz.value - tunedCenter) > 1000) return -Infinity
+  const db = rx.channelDb.value
+  const floor = Number.isFinite(floorDb.value) ? floorDb.value : db
+  // the floor drops at once to a quieter channel and rises only slowly, so a
+  // busy channel never becomes the floor.
+  floorDb.value = db < floor ? db : floor + 0.01 * (db - floor)
+  return db - floorDb.value
+}
 const running = ref(false)
 // only a simulated radio draws the invented trace, a real one shows nothing
 // until it is actually sampling.
@@ -51,9 +71,11 @@ const scanner = new Scanner(
     tune: async (hz, mode) => {
       currentEntry.value = scanner.current
       rx.setMode(mode as DemodMode)
-      await devices.configure(props.deviceId, { centerHz: hz })
+      rx.setOffset(-OFFSET_HZ)
+      tunedCenter = hz + OFFSET_HZ
+      await devices.configure(props.deviceId, { centerHz: tunedCenter })
     },
-    level: () => rx.signalDb.value,
+    level: channelLevel,
     onState: (s) => {
       state.value = s
       entries.value = [...scanner.list]
@@ -188,12 +210,14 @@ onBeforeUnmount(() => {
 
     <div class="bn-knobs" style="margin-top: 0">
       <div class="bn-knob" style="min-width: 190px">
-        <span class="bn-klabel">squelch <b>{{ threshold }} dB</b></span>
+        <label class="bn-klabel" for="scan-squelch">squelch <b>{{ threshold }} dB over the floor</b></label>
         <input
+          id="scan-squelch"
           v-model.number="threshold"
           type="range"
-          min="-100"
-          max="-20"
+          min="3"
+          max="30"
+          :aria-valuetext="`${threshold} dB over the noise floor`"
           @change="scanner.configure({ thresholdDb: threshold })"
         />
       </div>
@@ -254,7 +278,7 @@ onBeforeUnmount(() => {
       </div>
     </div>
 
-    <InstSmeter :db="rx.signalDb.value" />
+    <InstSmeter :db="rx.channelDb.value" :floor-db="Number.isFinite(floorDb) ? floorDb : -90" :ceil-db="(Number.isFinite(floorDb) ? floorDb : -90) + 40" />
     <InstScope :bins="stream.fft.value" :height="120" ruled :demo="!running && sim" />
 
     <div class="bn-subhead" style="margin-top: 14px">

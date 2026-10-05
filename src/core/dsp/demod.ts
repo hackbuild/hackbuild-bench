@@ -322,6 +322,8 @@ export class ReceiveChain {
   private inputRate = 0
   private offset = 0
   private bandwidth = MODE_BANDWIDTH.fm
+  /** Power inside the listening slice on the last block, in dB of full scale. */
+  channelDb = -120
 
   constructor(outRate = 48000) {
     this.outRate = outRate
@@ -393,6 +395,7 @@ export class ReceiveChain {
   process(iq: Float32Array): Float32Array {
     if (this.mode === 'raw') return new Float32Array(0)
     const base = this.down.process(iq)
+    if (base.length) this.channelDb = ReceiveChain.power(base)
     let audio: Float32Array
     switch (this.mode) {
       case 'fm':

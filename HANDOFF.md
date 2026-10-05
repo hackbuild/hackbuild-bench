@@ -41,8 +41,11 @@ Everything is pushed and live. The recent code changes:
 - `dcf8e56` eight decoder tabs, the iq player and recorder, and their audit
 - `26b60ae` the tv tab, which finds ATSC stations by pilot
 - `23aa5e8` the tv tab's analog picture view
-- the spectrum stage, tuning by drag and keys, full colour maps, and the
-  ssb fix, in the commit after the handoff update
+- `ad7e19d` the spectrum stage, tuning by drag and keys, full colour maps,
+  and the ssb fix
+- `ab83586` a tool that fails to load says so and offers a reload, since a
+  page opened before a deploy asks for files that are gone
+- the scanner and trunking rework, after that
 
 Nothing is uncommitted except `.claude/`, which stays out. The next likely
 asks are a live analog tv test when the Mesa ham repeater is on (see tv
@@ -333,6 +336,53 @@ They embed librtlsdr code, see the license note below. To rebuild one:
   - `HbDial` digits still take no keyboard. That gap is in the ui library.
   - The knobs keep the design system's pink sliders and values, as its kerf
     reference does.
+
+### scanner and trunking, 2026-10-05
+
+Both modes of the scanner tab were broken on hardware.
+
+- **Trunked.** The old path tuned the control channel onto the window
+  centre, where the dc spike sits, and never gave the decoder an offset.
+  It filtered with a boxcar, sampled the discriminator at one instant per
+  symbol, and matched the sync in one polarity only. `src/core/scanner/p25`
+  is now split up:
+  - `framing.ts` holds the sync, the trellis and its interleave, the crc,
+    and `buildTsdu` to make frames.
+  - `receiver.ts` reads each symbol as the phase turned across it, behind a
+    windowed sinc channel filter. That hears C4FM and simulcast LSM alike.
+    A Gardner loop keeps time, and the average turn steers out carrier
+    error. The sync matches in either polarity. Any unit but a data packet
+    is read as a TSDU and dropped if its first block fails, since one
+    wrong symbol in the duid used to throw whole units away.
+  - `modulate.ts` transmits C4FM or LSM with an optional simulcast echo,
+    for tests.
+- **What was checked.** On synthetic frames at 2.4 Msps with noise, 176 to
+  179 of 180 TSBKs decode:
+  - C4FM, with a 700 Hz carrier error, and with an inverted spectrum
+  - LSM, with 30 and 60 us echoes
+  - heavy noise gives 164.
+
+  The old decoder got 0 inverted, 0 under heavy noise and 6 with a 60 us
+  echo. In the browser, a synthetic RWC simulcast recording played through
+  the trunked view gave 296 good blocks and 0 bad, read the NAC, and named
+  the talkgroups.
+- **The tab.**
+  - It parks the control channel 300 kHz below centre and holds the radio
+    through the stream lease.
+  - It hunts the site's listed control frequencies, moving on after 5 s
+    with no sync.
+  - It says in a line what it hears.
+  - It reads a recording in place.
+  - The follow button is gone. It retuned off the control channel and still
+    played nothing, since there is no IMBE or AMBE vocoder.
+- **Conventional.** The squelch read the power of the whole window, so any
+  strong signal in 2.4 MHz opened it. The receive chain now reports
+  `channelDb` inside the listening slice, and the scanner tunes 250 kHz off
+  the channel. It ignores readings still arriving from the last frequency
+  and opens at a level over a tracked noise floor, 10 dB by default.
+- **Not run on air yet.** The stick was held by the browser the whole
+  time. The RWC control frequencies bundled match what RadioReference
+  users list.
 
 ## audit, 2026-10-03
 

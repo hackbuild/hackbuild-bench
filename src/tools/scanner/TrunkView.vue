@@ -5,14 +5,16 @@ import InstScope from '@/components/instruments/InstScope.vue'
 import { TrunkFollower } from '@/core/scanner/p25/trunk'
 import type { TrunkCall } from '@/core/scanner/p25/trunk'
 import { DemoControlChannel } from '@/core/scanner/p25/demo'
-import { ControlChannelDecoder } from '@/core/scanner/p25/c4fm'
-import type { C4fmStats } from '@/core/scanner/p25/c4fm'
+import { ControlChannelDecoder } from '@/core/scanner/p25/receiver'
+import type { P25Stats } from '@/core/scanner/p25/receiver'
 import { bus } from '@/core/bus/DeviceBus'
 import { allSystems } from '@/core/scanner/systems'
 import type { RadioSystem } from '@/core/scanner/systems'
 import { SERVICE_LABELS } from '@/core/scanner/conventional'
+import { fixedWindow, reaches } from '@/core/dsp/spectrumMath'
 import { useDevices } from '@/stores/devices'
 import { useDeviceStream } from '@/composables/useDeviceStream'
+import { useStreamLease } from '@/composables/useStreamLease'
 import { isSimKind } from '@/core/drivers/sim/simulate'
 import { formatClock, formatHz } from '@/core/format'
 import type { DeviceToolProps } from '@/tools/types'
@@ -21,22 +23,53 @@ const props = defineProps<DeviceToolProps>()
 
 const devices = useDevices()
 const stream = useDeviceStream(props.deviceId)
+const lease = useStreamLease(props.deviceId)
+
+/** The control channel sits this far below the window centre, clear of the dc spike. */
+const OFFSET_HZ = 300_000
+const WANT_RATE = 2_400_000
+/** A listed control frequency that shows no frame sync for this long is passed over. */
+const HUNT_MS = 5000
 
 const node = computed(() => devices.nodes.find((n) => n.id === props.deviceId) ?? null)
 const isDemo = computed(() => (node.value ? isSimKind(node.value.kind) : false))
+const centerSpec = computed(() => node.value?.descriptor.params.find((p) => p.key === 'centerHz'))
+const rateSpec = computed(() => node.value?.descriptor.params.find((p) => p.key === 'sampleRate'))
 
 const systems = allSystems()
 const systemId = ref(systems[0]?.id ?? '')
 const siteIndex = ref(0)
+/** Which of the site's listed control frequencies is being tried. */
+const controlIndex = ref(0)
 const running = ref(false)
 const calls = shallowRef<TrunkCall[]>([])
 const identCount = ref(0)
-const lock = ref<C4fmStats | null>(null)
+const lock = ref<P25Stats | null>(null)
 const serviceFilter = ref<string>('all')
+const error = ref<string | null>(null)
+/** Listed control frequencies tried without a sync, in this run. */
+const triedSilent = ref(0)
 
 const system = computed<RadioSystem | undefined>(() => systems.find((s) => s.id === systemId.value))
 const site = computed(() => system.value?.sites[siteIndex.value])
-const controlHz = computed(() => site.value?.controlHz[0] ?? 0)
+const controlList = computed(() => site.value?.controlHz ?? [])
+const controlHz = computed(() => controlList.value[controlIndex.value] ?? controlList.value[0] ?? 0)
+/** A recording holds one window. Its centre and rate, when the device is one. */
+const recording = computed(() => {
+  const s = centerSpec.value
+  const rate = node.value?.params.sampleRate ?? 0
+  return s && fixedWindow(s, rate) ? { centerHz: s.min, rate } : null
+})
+/** Listed control frequencies a recording holds well inside its window. */
+function inRecording(hz: number): boolean {
+  const r = recording.value
+  return !!r && Math.abs(hz - r.centerHz) < r.rate * 0.4
+}
+const reachable = computed(() => {
+  if (isDemo.value) return true
+  if (recording.value) return controlList.value.some(inRecording)
+  return !centerSpec.value || controlList.value.some((hz) => reaches(centerSpec.value!, hz))
+})
 
 let follower: TrunkFollower | null = null
 let demo: DemoControlChannel | null = null
@@ -44,6 +77,8 @@ let decoder: ControlChannelDecoder | null = null
 let unsubscribe: (() => void) | null = null
 let feedTimer: ReturnType<typeof setInterval> | null = null
 let ageTimer: ReturnType<typeof setInterval> | null = null
+let lastSyncs = 0
+let lastSyncAt = 0
 
 const filtered = computed(() => {
   if (serviceFilter.value === 'all') return calls.value
@@ -52,9 +87,58 @@ const filtered = computed(() => {
 
 const active = computed(() => calls.value.filter((c) => c.endedAt === null).slice(0, 6))
 
+/** The highest offered rate at or under the one wanted. */
+function scanRate(): number {
+  const s = rateSpec.value
+  if (!s?.choices?.length) return s ? Math.min(s.max, Math.max(s.min, WANT_RATE)) : WANT_RATE
+  const under = s.choices.filter((r) => r <= WANT_RATE)
+  return under.length ? Math.max(...under) : Math.min(...s.choices)
+}
+
+/** Parks the radio so the control channel sits off the window centre, and points the decoder at it. */
+async function tuneControl(): Promise<void> {
+  const r = recording.value
+  if (r) {
+    // a recording cannot retune, so the decoder looks where the channel already is.
+    if (!inRecording(controlHz.value)) controlIndex.value = Math.max(0, controlList.value.findIndex(inRecording))
+    decoder?.setOffset(controlHz.value - r.centerHz)
+    lastSyncAt = Date.now()
+    lastSyncs = lock.value?.syncs ?? 0
+    return
+  }
+  const hz = controlHz.value
+  decoder?.setOffset(-OFFSET_HZ)
+  lastSyncAt = Date.now()
+  lastSyncs = lock.value?.syncs ?? 0
+  await devices.configure(props.deviceId, { centerHz: hz + OFFSET_HZ, sampleRate: scanRate() })
+}
+
+/**
+ * A system moves its control channel among the frequencies it lists, so a
+ * silent one is passed over for the next, the way a scanner hunts.
+ */
+async function hunt(): Promise<void> {
+  const s = decoder?.getStats()
+  if (!s) return
+  lock.value = s
+  if (s.syncs !== lastSyncs) {
+    lastSyncs = s.syncs
+    lastSyncAt = Date.now()
+    triedSilent.value = 0
+    return
+  }
+  if (Date.now() - lastSyncAt < HUNT_MS || controlList.value.length < 2 || recording.value) return
+  triedSilent.value = Math.min(controlList.value.length, triedSilent.value + 1)
+  controlIndex.value = (controlIndex.value + 1) % controlList.value.length
+  follower?.flushIdentifiers()
+  await tuneControl()
+}
+
 async function start(): Promise<void> {
   const sys = system.value
   if (!sys || !controlHz.value) return
+  error.value = null
+  triedSilent.value = 0
 
   follower = new TrunkFollower(sys, {
     onCall: () => {
@@ -68,15 +152,7 @@ async function start(): Promise<void> {
       identCount.value = n
     },
   })
-  follower.setCenter(controlHz.value)
-
-  // one narrow channel is all this needs, and a low rate keeps the decoder
-  // ahead of the samples.
-  await devices.configure(props.deviceId, {
-    centerHz: controlHz.value,
-    ...(isDemo.value ? {} : { sampleRate: 2000000 }),
-  })
-  await devices.start(props.deviceId, 'iq')
+  ageTimer = setInterval(() => follower?.tick(), 1000)
   running.value = true
 
   if (isDemo.value) {
@@ -85,17 +161,25 @@ async function start(): Promise<void> {
     feedTimer = setInterval(() => {
       if (demo && follower) follower.feedTsbk(demo.next())
     }, 260)
-  } else {
+    return
+  }
+
+  const t = lease.begin()
+  try {
     decoder = new ControlChannelDecoder((octets) => follower?.feedTsbk(octets))
     unsubscribe = bus.onDeviceArtifact(props.deviceId, (a) => {
       if (a.kind !== 'iq') return
       decoder?.feed(a.samples, a.sampleRate)
     })
-    feedTimer = setInterval(() => {
-      lock.value = decoder?.getStats() ?? null
-    }, 500)
+    await tuneControl()
+    if (!lease.current(t)) return
+    if (!(await lease.stream(t))) return
+    feedTimer = setInterval(() => void hunt(), 500)
+  } catch (err) {
+    if (!lease.current(t)) return
+    error.value = err instanceof Error ? err.message.toLowerCase() : String(err)
+    await stop()
   }
-  ageTimer = setInterval(() => follower?.tick(), 1000)
 }
 
 async function stop(): Promise<void> {
@@ -108,13 +192,20 @@ async function stop(): Promise<void> {
   unsubscribe = null
   decoder = null
   lock.value = null
-  await devices.stop(props.deviceId).catch(() => undefined)
+  await lease.release()
 }
 
-function follow(call: TrunkCall): void {
-  if (!call.followable) return
-  void devices.configure(props.deviceId, { centerHz: call.hz })
-}
+/** What the decoder hears, in words. */
+const verdict = computed(() => {
+  const s = lock.value
+  if (!running.value || isDemo.value || !s) return ''
+  if (s.good > 0) return `decoding. ${s.good} control blocks read.`
+  if (s.syncs > 0) return 'p25 frames heard, but no block has passed its check yet. the signal is weak or smeared.'
+  if (triedSilent.value >= controlList.value.length && controlList.value.length > 1) {
+    return 'no p25 on any listed control frequency. the antenna may not reach the site, or the list is out of date.'
+  }
+  return `listening for p25 on ${formatHz(controlHz.value, 5)}.`
+})
 
 const SERVICES = ['all', 'fire', 'law', 'ems', 'interop']
 
@@ -133,19 +224,19 @@ onBeforeUnmount(() => {
     <div class="bn-knobs" style="margin-top: 0">
       <div class="bn-knob" style="min-width: 240px">
         <span class="bn-klabel">system</span>
-        <select v-model="systemId" :disabled="running">
+        <select v-model="systemId" :disabled="running" @change="siteIndex = 0; controlIndex = 0">
           <option v-for="s in systems" :key="s.id" :value="s.id">{{ s.name }}</option>
         </select>
       </div>
       <div class="bn-knob" style="min-width: 200px" v-if="system && system.sites.length">
         <span class="bn-klabel">site</span>
-        <select v-model.number="siteIndex" :disabled="running">
+        <select v-model.number="siteIndex" :disabled="running" @change="controlIndex = 0">
           <option v-for="(s, i) in system.sites" :key="s.id" :value="i">{{ s.name }}</option>
         </select>
       </div>
       <div class="bn-knob">
         <span class="bn-klabel">&nbsp;</span>
-        <HbButton v-if="!running" variant="danger" size="sm" :disabled="!controlHz" @click="start">
+        <HbButton v-if="!running" variant="danger" size="sm" :disabled="!controlHz || !reachable" @click="start">
           <template #icon><HbIcon name="tower-cell" /></template>
           watch control
         </HbButton>
@@ -167,7 +258,7 @@ onBeforeUnmount(() => {
     <div class="bn-meta">
       <div>
         <div class="bn-k">control</div>
-        <div class="bn-v is-pink">{{ formatHz(controlHz) }}</div>
+        <div class="bn-v">{{ formatHz(controlHz, 5) }}</div>
       </div>
       <div>
         <div class="bn-k">identifiers</div>
@@ -189,7 +280,18 @@ onBeforeUnmount(() => {
 
     <InstScope :bins="stream.fft.value" :height="110" ruled :demo="!running && isDemo" />
 
-    <div v-if="!isDemo && running" class="bn-reads" style="margin-top: 12px">
+    <p v-if="!reachable && recording" class="bn-note" role="alert">
+      this recording does not hold any of this site's control frequencies.
+    </p>
+    <p v-else-if="!reachable" class="bn-note" role="alert">
+      this tuner does not reach {{ formatHz(controlHz, 5) }}, so it cannot hear this site.
+    </p>
+    <p v-if="error" class="bn-note" role="alert">{{ error }}</p>
+    <div class="tr-live" role="status">
+      <p v-if="verdict" class="bn-note">{{ verdict }}</p>
+    </div>
+
+    <div v-if="!isDemo && running" class="bn-reads tr-reads">
       <div class="bn-read">
         <div class="bn-k">sync</div>
         <div class="bn-v" :class="{ 'is-pink': (lock?.syncs ?? 0) > 0 }">
@@ -212,15 +314,18 @@ onBeforeUnmount(() => {
         <div class="bn-k">eye</div>
         <div class="bn-v">{{ ((1 - (lock?.errorRate ?? 1)) * 100).toFixed(0) }}%</div>
       </div>
+      <div class="bn-read">
+        <div class="bn-k">carrier off by</div>
+        <div class="bn-v">{{ lock ? `${Math.round(lock.offsetHz)} hz` : '--' }}</div>
+      </div>
     </div>
 
-    <div v-if="!isDemo && running" class="bn-banner is-warn" style="margin-top: 12px">
+    <div v-if="!isDemo && running" class="bn-banner is-warn tr-reads">
       <HbIcon name="warning" />
       <span>
         the control channel is decoded here, so grants and talkgroups are real. the voice
-        channels are not: p25 carries imbe, which needs a vocoder this build does not
-        have. following a call retunes the radio to it and you will see the carrier, not
-        hear it. op25 and sdrtrunk decode the voice.
+        is not: phase 1 voice is imbe and phase 2 voice is ambe, and this build has neither
+        vocoder. op25 and sdrtrunk decode the voice.
       </span>
     </div>
 
@@ -253,17 +358,7 @@ onBeforeUnmount(() => {
         </span>
         <span class="bn-c">{{ c.endedAt === null ? 'live' : formatClock(c.startedAt) }}</span>
         <div class="bn-decode">
-          {{ formatHz(c.hz) }}<template v-if="c.source"> from unit {{ c.source }}</template>
-          <button
-            v-if="c.followable"
-            type="button"
-            class="bn-tinyact"
-            style="margin-left: 8px"
-            @click="follow(c)"
-          >
-            follow
-          </button>
-          <template v-else> outside the tuned window, metadata only</template>
+          {{ formatHz(c.hz, 5) }}<template v-if="c.source"> from unit {{ c.source }}</template>
         </div>
       </div>
       <div v-if="!filtered.length" class="bn-row">
@@ -279,3 +374,9 @@ onBeforeUnmount(() => {
     </p>
   </div>
 </template>
+
+<style scoped>
+.tr-reads {
+  margin-top: var(--hb-s3);
+}
+</style>

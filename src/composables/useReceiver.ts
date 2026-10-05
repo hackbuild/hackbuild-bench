@@ -28,6 +28,13 @@ export function useReceiver(deviceId: string, opts: ReceiverOptions = {}) {
   const ownsStream = opts.ownsStream ?? true
   const mode = ref<DemodMode>('fm')
   const signalDb = ref(-120)
+  /**
+   * Power inside the listening slice, and the window centre it was measured
+   * at, so a caller that just retuned can tell a reading from the new
+   * frequency from one still on the way from the old.
+   */
+  const channelDb = ref(-120)
+  const channelCenterHz = ref(0)
   const listening = ref(false)
   /** Where inside the tuned window we are listening, in Hz from its centre. */
   const offsetHz = ref(0)
@@ -64,6 +71,8 @@ export function useReceiver(deviceId: string, opts: ReceiverOptions = {}) {
     }
 
     const audio = chain.process(chunk.samples)
+    channelDb.value = chain.channelDb
+    channelCenterHz.value = chunk.centerHz
     if (audio.length) {
       sink.value?.push(audio, 48000)
       // the same audio re-enters the bus so the transcriber and the recorder
@@ -141,6 +150,8 @@ export function useReceiver(deviceId: string, opts: ReceiverOptions = {}) {
   return {
     mode,
     signalDb,
+    channelDb,
+    channelCenterHz,
     listening,
     sink,
     offsetHz,
