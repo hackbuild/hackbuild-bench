@@ -61,6 +61,7 @@ Decoders run on any radio that streams iq, and on recordings:
 | weather sat | Meteor-M LRPT images, and NOAA APT from archived recordings | 137.1 and 137.9 MHz |
 | tune | FM station name, PI and call sign, radiotext and clock over RDS | FM broadcast |
 | tv | which ATSC stations are on air, by pilot, with a meter for aiming an antenna and a crystal check. Not the picture: a channel is 6 MHz wide. | US tv channels 2 to 36 |
+| tv, analog picture | analog NTSC tv in black and white, and its sound by retuning, such as ham tv repeaters | 421.25, 1253.25 MHz and the like |
 
 The spectrum tab measures as well as draws. It has:
 

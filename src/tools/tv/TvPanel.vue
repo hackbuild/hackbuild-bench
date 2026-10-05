@@ -3,6 +3,7 @@ import { computed, onBeforeUnmount, ref, shallowRef } from 'vue'
 import { HbButton, HbIcon } from '@virgilvox/hackbuild-ui'
 import InstDfMeter from '@/components/instruments/InstDfMeter.vue'
 import InstSweepBar from '@/components/instruments/InstSweepBar.vue'
+import AnalogTv from './AnalogTv.vue'
 import { bus } from '@/core/bus/DeviceBus'
 import { isSimKind } from '@/core/drivers/sim/simulate'
 import { fixedWindow, reaches } from '@/core/dsp/spectrumMath'
@@ -81,6 +82,15 @@ const aimed = ref<TvChannel | null>(null)
 const aimDb = ref(Number.NaN)
 const aimBest = ref(Number.NaN)
 const showEmpty = ref(false)
+/** Digital stations are found here; an analog picture is shown by its own view. */
+const view = ref<'digital' | 'analog'>('digital')
+
+async function switchView(next: 'digital' | 'analog'): Promise<void> {
+  if (next === view.value) return
+  // each view holds the radio its own way, so the scan lets go first.
+  if (running.value) await stop()
+  view.value = next
+}
 
 const look = new TvLook()
 let want = { centerHz: 0, rate: 0 }
@@ -323,6 +333,20 @@ const ROW_HEAD = ['rf', 'band', 'mhz', 'what', 'pilot', 'over floor', '']
 
 <template>
   <div>
+    <div class="bn-acts tv-views" role="group" aria-label="what to look for">
+      <HbButton size="sm" :aria-pressed="view === 'digital'" @click="switchView('digital')">
+        <template #icon><HbIcon name="tower-broadcast" /></template>
+        digital stations
+      </HbButton>
+      <HbButton size="sm" :aria-pressed="view === 'analog'" @click="switchView('analog')">
+        <template #icon><HbIcon name="display" /></template>
+        analog picture
+      </HbButton>
+    </div>
+
+    <AnalogTv v-if="view === 'analog'" :device-id="deviceId" />
+
+    <div v-else>
     <div class="bn-meta">
       <div>
         <div class="bn-k">with a pilot</div>
@@ -467,10 +491,14 @@ const ROW_HEAD = ['rf', 'band', 'mhz', 'what', 'pilot', 'over floor', '']
         channels light up, lower the gain: a strong station overloads the radio.
       </div>
     </div>
+    </div>
   </div>
 </template>
 
 <style scoped>
+.tv-views {
+  margin-bottom: var(--hb-s3);
+}
 .tv-acts {
   margin-top: var(--hb-s3);
 }

@@ -425,6 +425,45 @@ Live in Phoenix on the FC0012 at gain 20, indoors:
 RF 11 also showed as wideband. It may be the Buckeye translator K04SE-D, or
 spill from a strong neighbour. That is unconfirmed.
 
+### analog picture, 2026-10-05
+
+The tv tab's second view (`src/tools/tv/AnalogTv.vue`, `src/core/decode/ntsc`)
+shows analog NTSC, black and white, in a worker. Digital tv cannot be shown:
+its picture fills 6 MHz and every part is needed. Analog keeps the carrier
+and the coarse detail together, so a 2.4 Msps window, holding the carrier
+and about 1.6 MHz of detail, gives a soft but whole picture.
+
+- **Chain.** The carrier is found by an fft within 80 kHz of where it was
+  asked for, mixed to dc, and detected against a 3 kHz average of itself,
+  phase only. A line clock locks to the sync tips' rising edges, broad
+  pulses place the fields, and a field counts only 262 or 263 lines after
+  the last. Two fields are woven into 320 by 480.
+- **Guards.** A carrier under 12 dB is not decoded, and the carrier is
+  looked for again every half second. Two seconds without line lock drops
+  the carrier.
+- **Sound** is 4.5 MHz up, out of the window. "hear the sound" retunes to
+  it and plays it through `useReceiver` in fm, which pauses the picture.
+- **Demo.** `NtscDemoSource` is a standard NTSC transmitter: a test card
+  with a moving box, every equalising and broad pulse in place.
+
+Checked:
+
+- **Node.** The demo cut to the carrier -0.4 to +1.6 MHz decodes at 30
+  frames a second, with line and field lock at 100 percent and 0.981
+  correlation with the card.
+- **Browser.** A synthetic 8-bit recording with noise and a 3.7 kHz offset
+  plays through the iqfile player locked at 30 frames a second. A real
+  10 s capture of 421.25 MHz from the FC0012 reads 11 db of carrier and
+  shows no frames.
+- **Not run on the stick yet:** live tuning and the sound switch, because
+  the browser's usb grant was lost and the chooser went unanswered.
+
+On air: ATN lists analog repeaters at 421.25 MHz in Mesa and 1253.25 MHz on
+White Tank, as of November 2025. On 2026-10-05 at about 07:20 UTC, 421.25
+was silent. A repeater transmits only while someone uses it. ATN's weekly
+net is Tuesdays at 1930 Pacific. The FC0012 does not reach 1253.25. The
+NESDR does.
+
 ## recordings
 
 - **Player:** the `iqfile` driver (`src/core/drivers/iqfile`) plays .cu8,
