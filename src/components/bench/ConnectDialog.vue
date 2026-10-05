@@ -154,13 +154,14 @@ const sorted = computed(() =>
               {{ d.descriptor.intro.link.label }}
             </HbButton>
             <HbButton
+              v-if="!d.descriptor.accessFields?.length"
               variant="danger"
               size="sm"
               :loading="devices.connecting"
               @click="go(d, firstTransport(d))"
             >
               <template #icon><HbIcon name="plug-circle-plus" /></template>
-              i have a flashed board, connect
+              {{ d.descriptor.intro.action ?? 'connect' }}
             </HbButton>
           </div>
         </div>

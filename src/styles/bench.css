@@ -495,6 +495,10 @@ canvas {
   line-height: 1.5;
   margin: 12px 0 0;
 }
+.bn-unmet > summary {
+  cursor: pointer;
+}
+
 /** An inline action inside a note, so it reads as part of the sentence. */
 .bn-linkish {
   font-family: var(--hb-body);
@@ -2901,4 +2905,326 @@ canvas {
 }
 .bn-tools .hb-select {
   width: auto;
+}
+
+
+/* ---- sky ---------------------------------------------------------------- */
+
+/* the radar keeps its square and the aircraft table takes the rest of the
+   row, dropping underneath once the row is too narrow for both. */
+.bn-sky {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--hb-s3);
+  align-items: flex-start;
+  margin: var(--hb-s3) 0;
+}
+.bn-sky > .bn-void {
+  flex: 0 1 360px;
+}
+.bn-sky > .hb-scroll-x {
+  flex: 1 1 320px;
+  min-width: 0;
+}
+
+
+/* ---- ism sensors -------------------------------------------------------- */
+
+/* a table at desktop width. under 760 px each sensor becomes a card and every
+   cell carries its own label, so nothing scrolls sideways. */
+.bn-sens {
+  border: var(--hb-border) solid var(--hb-ink);
+  background: var(--hb-paper-raised);
+  font-family: var(--hb-utility);
+  font-size: 12px;
+  max-height: 360px;
+  overflow-y: auto;
+}
+.bn-sens-row {
+  display: grid;
+  grid-template-columns:
+    minmax(120px, 1.6fr) minmax(0, 0.6fr) minmax(0, 0.35fr) minmax(0, 1.5fr) minmax(0, 0.7fr)
+    minmax(0, 1.4fr) minmax(0, 0.8fr) minmax(0, 0.6fr) minmax(0, 0.8fr) minmax(0, 0.6fr) minmax(0, 0.5fr);
+  gap: var(--hb-s2);
+  padding: var(--hb-s2) var(--hb-s3);
+  border-bottom: 1px solid var(--hb-paper-edge);
+  align-items: baseline;
+}
+.bn-sens-row:last-child {
+  border-bottom: 0;
+}
+.bn-sens-row.is-head {
+  position: sticky;
+  top: 0;
+  background: var(--hb-ink);
+  color: var(--hb-paper);
+  font-size: 9px;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+}
+.bn-sens-row.is-empty {
+  grid-template-columns: 1fr;
+  color: var(--hb-ink-3);
+}
+.bn-sens-row > span {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.bn-sens-model {
+  font-weight: 700;
+}
+.bn-sens-num {
+  font-family: var(--hb-readout);
+  font-size: 15px;
+  color: var(--hb-ink);
+}
+.bn-sens-row .is-low {
+  color: var(--hb-err);
+  font-weight: 700;
+}
+.bn-sens-other {
+  grid-column: 1 / -1;
+  font-family: var(--hb-readout);
+  font-size: 14px;
+  color: var(--hb-ink-3);
+}
+@media (max-width: 760px) {
+  .bn-sens-row.is-head {
+    display: none;
+  }
+  .bn-sens-row {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    row-gap: var(--hb-s1);
+  }
+  .bn-sens-row > span:empty {
+    display: none;
+  }
+  .bn-sens-model {
+    grid-column: 1 / -1;
+  }
+  .bn-sens-row:not(.is-empty) > span:not(.bn-sens-model)::before {
+    content: attr(data-k);
+    display: block;
+    font-family: var(--hb-utility);
+    font-size: 9px;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    color: var(--hb-ink-3);
+  }
+}
+
+.bn-raw {
+  background: var(--hb-void);
+  border: var(--hb-border) solid var(--hb-ink);
+  max-height: 320px;
+  overflow-y: auto;
+}
+.bn-raw-row {
+  padding: var(--hb-s2) var(--hb-s3);
+  border-bottom: 1px solid var(--bn-ink-line);
+  min-width: 0;
+}
+.bn-raw-row:last-child {
+  border-bottom: 0;
+}
+.bn-raw-row.is-empty {
+  font-family: var(--hb-utility);
+  font-size: 11px;
+  color: var(--bn-label-void);
+}
+.bn-raw-head {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--hb-s1) var(--hb-s3);
+  font-family: var(--hb-utility);
+  font-size: 10px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--bn-label-void);
+}
+.bn-raw-head span:first-child {
+  color: var(--hb-lit-info);
+}
+.bn-raw-k {
+  font-family: var(--hb-readout);
+  font-size: 15px;
+  color: var(--hb-slime);
+  overflow-wrap: anywhere;
+}
+.bn-raw-t {
+  font-family: var(--hb-readout);
+  font-size: 13px;
+  color: var(--bn-label-void);
+  overflow-wrap: anywhere;
+}
+.bn-ptrain {
+  display: block;
+  width: 100%;
+  height: 22px;
+  margin: var(--hb-s2) 0 var(--hb-s1);
+}
+.bn-ptrain path {
+  fill: none;
+  stroke: var(--hb-slime);
+  stroke-width: 1.5;
+}
+
+
+/* ---- acars --------------------------------------------------------------- */
+
+.bn-acars-chans {
+  margin: var(--hb-s3) 0;
+}
+.bn-acars-chans .bn-row .bn-c {
+  color: var(--hb-ink-2);
+}
+
+
+/* an !aivdm sentence is one unbroken word, so it wraps anywhere at 390 px. */
+.bn-nmea .hb-console > div {
+  overflow-wrap: anywhere;
+}
+
+
+/* weather sat: the constellation sits beside the growing msu-mr picture and
+   drops under it on a phone. */
+.bn-lrpt {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: var(--hb-s2);
+  align-items: start;
+  margin-top: var(--hb-s2);
+}
+.bn-iq {
+  width: calc(var(--hb-s6) * 5);
+}
+.bn-iq canvas {
+  width: calc(var(--hb-s6) * 5);
+  height: calc(var(--hb-s6) * 5);
+}
+@media (max-width: 560px) {
+  .bn-lrpt {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+.bn-hidden {
+  display: none;
+}
+
+
+/* rds strip on the tune tab. the station name is a readout, the call sign
+   and type are labels, and the radiotext scrolls when it overflows. */
+.bn-rds {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: var(--hb-s1) var(--hb-s3);
+  background: var(--hb-void);
+  border: var(--hb-border) solid var(--hb-ink);
+  padding: var(--hb-s1) var(--hb-s3);
+  margin-bottom: var(--hb-s2);
+  min-width: 0;
+}
+.bn-rds-ps {
+  font-family: var(--hb-readout);
+  font-size: 26px;
+  line-height: 1;
+  color: var(--hb-slime);
+  white-space: pre;
+}
+.bn-rds-id,
+.bn-rds-tag {
+  font-family: var(--hb-utility);
+  font-size: 10px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--bn-label-void);
+}
+.bn-rds-tag {
+  border: var(--hb-border) solid var(--bn-ink-border);
+  padding: 0 var(--hb-s1);
+}
+.bn-rds-rt {
+  flex: 1 1 100%;
+  overflow: hidden;
+  white-space: nowrap;
+  font-family: var(--hb-readout);
+  font-size: 18px;
+  color: var(--hb-lit-info);
+  min-width: 0;
+}
+.bn-rds-rt span {
+  display: inline-block;
+}
+.bn-rds-rt span.is-long {
+  padding-left: 100%;
+  animation: bn-rds-scroll 16s linear infinite;
+}
+@keyframes bn-rds-scroll {
+  from {
+    transform: translateX(0);
+  }
+  to {
+    transform: translateX(-100%);
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .bn-rds-rt {
+    white-space: normal;
+  }
+  .bn-rds-rt span.is-long {
+    padding-left: 0;
+    animation: none;
+  }
+}
+
+/* alerts tab: one button per noaa channel with its level under it. */
+.bn-chans {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(92px, 1fr));
+  gap: var(--hb-s2);
+  margin-bottom: var(--hb-s3);
+}
+.bn-chan {
+  font-family: var(--hb-utility);
+  font-size: 11px;
+  padding: var(--hb-s1) var(--hb-s2);
+  border: var(--hb-border) solid var(--hb-ink);
+  background: var(--hb-paper-raised);
+  box-shadow: var(--hb-shadow);
+  color: var(--hb-ink);
+  text-align: left;
+  cursor: pointer;
+}
+.bn-chan:disabled {
+  cursor: not-allowed;
+  color: var(--hb-ink-4);
+  box-shadow: none;
+}
+.bn-chan.is-on {
+  background: var(--hb-ink);
+  color: var(--hb-paper);
+}
+.bn-chan b {
+  display: block;
+  font-family: var(--hb-readout);
+  font-size: 18px;
+  font-weight: 400;
+}
+.bn-chan .bn-chan-bar {
+  display: block;
+  height: var(--hb-s1);
+  margin-top: var(--hb-s1);
+  background: var(--hb-paper-edge);
+}
+.bn-chan .bn-chan-bar i {
+  display: block;
+  height: 100%;
+  background: var(--hb-ok);
+}
+.bn-chan.is-on .bn-chan-bar {
+  background: var(--bn-ink-border);
+}
+.bn-chan.is-on .bn-chan-bar i {
+  background: var(--hb-slime);
 }

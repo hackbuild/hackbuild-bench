@@ -285,9 +285,148 @@ Left as they are:
   picked 2.048 before, because the rate list grew. No playbook needs more
   than about 500 kHz either side.
 
+## decoders, 2026-10-04
+
+Eight decoders were added as tool tabs. The table gives the reference each
+was checked against, on public recordings and on captures from the bench
+antenna in Phoenix. The captures were made on the FC0012 stick, with an
+indoor antenna.
+
+| tab | code | checked against | result |
+|---|---|---|---|
+| sky (ADS-B) | `core/decode/adsb`, Web Worker | dump1090-fa 11.1 on `modes1.bin` | 325 of 325 messages, every field |
+| acars | `core/decode/acars` | acarsdec 3.7 on its test file and two Stanford off-air recordings | 191 of 191, every field |
+| pagers | `core/decode/pager` | multimon-ng 1.6.2 on its real POCSAG samples and a real FLEX P2000 sample | every real page identical |
+| sensors | `core/decode/ism` | rtl_433 25.12 on 708 `rtl_433_tests` files | every file for the 11 ported families |
+| ships (AIS) | `core/decode/ais` | AIS-catcher 0.70 | 93 to 98 percent of messages, depending on the recording |
+| balloons (RS41) | `core/decode/radiosonde` | rs1729 `rs41mod` | every frame of the clean recordings |
+| weather sat (Meteor-M LRPT) | `core/decode/lrpt`, Web Worker | SatDump 1.2.2 on a real M2 recording | 884 shared frames byte-identical; images within 0.01 of a grey level on average |
+| alerts (SAME) | `core/decode/same` | multimon-ng EAS | byte-identical headers |
+| tune tab, RDS | `core/decode/rds`, Web Worker | redsea 1.3.1 | PI, call sign, radiotext and clock identical on the 101.5 MHz air capture |
+
+**Heard live here, through the bench:**
+- FLEX pages on 929.6 MHz
+- KALV's RDS on 101.5 MHz
+- NOAA Weather Radio audio on 162.550 MHz
+
+**Empty in the captures,** for both the reference and ours: ACARS, 433 and 915 MHz sensors, a sonde at 403.2 MHz, and SAME. It was a Sunday. The weekly test runs Wednesday 11 to noon.
+
+**Not run on live air:**
+- ADS-B, because 1090 MHz is out of the FC0012's range
+- AIS, because there is no water in range
+- Meteor, which needs a pass and an outdoor antenna
+
+Shared pieces:
+
+- `bus.emitDecoded(id, draft)` publishes a panel's packets, readings and
+  image blobs as the device's own, the way `emitAudio` does for audio.
+  `src/tools/emit.ts` wraps it.
+- `spectrumMath.fixedWindow()` tells a panel it is on a device that cannot
+  retune, such as a recording, and gives the window it holds. The pager,
+  acars and balloon tabs then decode inside that window instead of asking
+  for a tune, and the sky tab plays 2 Msps recordings as well as 2.4.
+- `core/dsp/channel.ts` is a shared mixer and filter, used by ais and
+  radiosonde.
+
+Each panel holds the stream through `useStreamLease` (below), tunes only
+when it starts, and stops only a stream it started. A frequency the tuner
+cannot reach is named, with that tuner's range. The decoder panels load on
+first open, and pagers, acars and balloons sit under the advanced toggle.
+
+## audit, 2026-10-04
+
+Four reviews ran over the decoder work: lifecycle and races, the decoders on
+recordings, the iq player and recorder, and RULES.md with accessibility.
+The verified findings were fixed and checked in headless Chrome, in demo
+mode and on recordings built in the page or played from the air captures.
+
+- **Stream lease.** `src/composables/useStreamLease.ts` gives each start a
+  token that is checked after every await, so a stop or a tab switch in the
+  middle of a start no longer leaves a stream running with no owner. Tabs
+  mount one at a time, so the old tab's stop can land after the new tab
+  found the stream running. A tab that still wants it restarts it and owns
+  it from then on. Every decoder tab uses it. Alerts passes
+  `ownsStream: false` to `useReceiver`, so listening there never stops a
+  stream the lease holds.
+- **Driver stop hook.** `DriverContext.stopped(reason)` lets a driver end
+  its own stream, and the bus sets the device idle and logs why. The player
+  uses it at the end of a file.
+- **Player.** The chunk size follows the rate, so a slow recording no longer
+  arrives in bursts. Samples skipped to keep pace are reported as dropped.
+  A replay after the end starts from the top, and an empty file is refused.
+  RF64, BW64 and WAVE_FORMAT_EXTENSIBLE wavs are read, as is a plain wav
+  past 4 gb whose size field wrapped.
+- **Recorder.** A failed write no longer stops every write after it. Past
+  64 mb waiting on the disk the recording ends and says so. The save picker
+  opens before the radio starts. Switching tools ends a recording.
+- **RDS** decodes only while the tune tab is listening in fm. Each reset
+  starts a new generation, so what the worker decoded for a station tuned
+  away from is dropped. Past 2 s of backlog, chunks are skipped.
+- **Sky** sends at most one packet per aircraft per second to the bus.
+  **Sensors** forgets a sensor after 30 minutes, and keeps 500 at most.
+  **Ships** refreshes the list after each prune.
+- **Balloons.** The scan windows overlap now, so a sonde at a window's
+  centre or edge is found. A pass is 8 windows, about 11 s. The track
+  clears when the serial changes.
+- **Meteor** reads the centre and rate of a file from its header or name,
+  and splits passes on a jump in the scan counter. Each finished pass goes
+  on the bus as a png, and only the new rows are repainted.
+- **Recordings in every decoder tab** decode inside the recording's window.
+  Sensors mixes a band that sits off the centre down to it first. Alerts
+  re-centres when the radio retunes.
+- **Demo traffic** never reaches the bus, so automations and the session log
+  only see real decodes. The session log batches its writes.
+- **Picking a device.** `bus.providers()` lists live radios before
+  recordings, so a playbook picks a radio.
+- **Rules and accessibility.** UI copy is lowercase, there is less pink,
+  tables have headers, and live regions are always rendered. The weather
+  tabs take arrow keys. Unmet tools fold into a single line.
+
+Left as they are:
+
+- a decoder stops when you leave its tab, because only the open tab is
+  mounted. That includes a recording in progress.
+- a 250k recording cut 80 kHz off centre leaves about 45 kHz either side,
+  which clips wide fsk sensors such as the WH24
+- the alerts retune path was not exercised, since a recording cannot retune
+- the HackRF's gains are not exposed in the new tabs
+
+## recordings
+
+- **Player:** the `iqfile` driver (`src/core/drivers/iqfile`) plays .cu8,
+  .cs8, .cs16, .cf32 and iq .wav into the bus at the recorded rate.
+  - It reads the centre and the rate from the wav header (SDR# `auxi` chunk)
+    or from the name, the way rtl_sdr, rtl_433, SDR#, SDR++ and gqrx write
+    it, or from fields typed in the connect dialog.
+  - It reads the file in slices, so size is no limit.
+  - A retune or a rate change is refused, with the recording's own centre
+    named.
+- **Recorder:** record iq on the spectrum tab writes `.cu8` through the save
+  picker, streaming to disk, and stops on a retune, on a slow disk, or when
+  you leave the tab.
+- **Testing without a picker:** a test can build a recording handle in the
+  page with `layoutOf` from `format.ts`, without going through the picker.
+
+The captures from this session live in the session scratch directory and are
+not in the repo.
+
 ## licensing, open
 
-librtlsdr is GPL-2.0-or-later. The headers of `tuner_e4k.c`, `tuner_fc0012.c`,
+Close ports that inherit their source's license:
+
+- the rtl-sdr tuner drivers, from librtlsdr, GPL-2.0-or-later
+- the ISM sensor decoder, from rtl_433, GPL-2.0-or-later
+- the ADS-B demodulator and frame scoring, from dump1090-fa, GPL-2.0-or-later
+- the ACARS demodulator and repair, from acarsdec, which says LGPL
+
+Written from the standards after reading the reference code:
+
+- pagers, after multimon-ng (GPL), whose BCH module is Unlicense
+- Meteor LRPT, after SatDump (GPL-3.0), with the MIT meteor_demod and
+  lrpt-encoder used as references
+- AIS and RS41
+
+The more detailed note on librtlsdr follows. librtlsdr is GPL-2.0-or-later. The headers of `tuner_e4k.c`, `tuner_fc0012.c`,
 `tuner_fc0013.c` and `tuner_r82xx.c` say so, and `tuner_fc2580.c` carries
 none. The new tuner files are close ports of that code. This repo declares
 MIT in package.json and has no LICENSE file. The older R820T port came by way
@@ -307,4 +446,9 @@ is open and belongs to the owner.
 - the stepped sweep was exercised in demo mode only
 - no offset tuning for the zero if tuners, so an E4000 or FC stick shows the
   demod's dc remainder at the centre. librtlsdr leaves it off by default too.
+- an rtl-sdr carries twelve tabs in easy mode and sixteen in
+  advanced, which wrap to several rows at 390 px. Grouping the decoders
+  under one tab is open.
+- `.claude/worktrees/` holds the agent worktrees the decoders were built in.
+  They are untracked and must not be committed.
 - custom domain pending DNS

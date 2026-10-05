@@ -81,6 +81,7 @@ const descriptor: DeviceDescriptor = {
       'you flash the firmware once, in your browser, on the conduyt playground. pick your board, click flash, done. then come back here, plug the board in, and hit connect.',
     ],
     link: { label: 'flash a board at conduyt.io/playground', href: 'https://conduyt.io/playground' },
+    action: 'i have a flashed board, connect',
   },
   limits: {
     [CAPABILITIES.SERIAL_CONSOLE]:

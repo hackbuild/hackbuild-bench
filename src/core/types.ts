@@ -1,7 +1,7 @@
 import type { Capability } from './capabilities'
 
 /** Which browser API a provider came in on. There is no bridge tier. */
-export type TransportKind = 'webusb' | 'webserial' | 'webble' | 'webhid' | 'http' | 'sim'
+export type TransportKind = 'webusb' | 'webserial' | 'webble' | 'webhid' | 'http' | 'file' | 'sim'
 
 export type DeviceStatus = 'detached' | 'opening' | 'idle' | 'streaming' | 'error'
 
@@ -60,6 +60,8 @@ export interface DeviceIntro {
   /** One paragraph per entry, in plain words. */
   body: string[]
   link?: { label: string; href: string }
+  /** The connect button's words, when the intro carries the button. Defaults to connect. */
+  action?: string
 }
 
 /** What a driver says about itself before anything is connected. */

@@ -122,10 +122,16 @@ async function disconnect(): Promise<void> {
         under the device log.
       </p>
 
-      <p v-for="u in unmet" :key="u.tool.id" class="bn-note">
-        no {{ u.tool.label }}: this device does not provide
-        {{ u.missing.map((c) => CAPABILITY_LABELS[c] ?? c).join(', ') }}.
-      </p>
+      <details v-if="unmet.length" class="bn-unmet">
+        <summary class="bn-note">
+          {{ unmet.length }} {{ unmet.length === 1 ? 'tool needs' : 'tools need' }} something this
+          device does not provide
+        </summary>
+        <p v-for="u in unmet" :key="u.tool.id" class="bn-note">
+          no {{ u.tool.label }}: this device does not provide
+          {{ u.missing.map((c) => CAPABILITY_LABELS[c] ?? c).join(', ') }}.
+        </p>
+      </details>
     </div>
 
     <ArmDialog

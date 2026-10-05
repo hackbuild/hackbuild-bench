@@ -78,7 +78,9 @@ export class DeviceBus {
 
   /** Every connected device that provides this capability. */
   providers(cap: Capability): DeviceNode[] {
-    return this.nodes.filter((n) => n.capabilities.includes(cap))
+    // a recording provides iq too, but a tool asking for any device means a live one.
+    const live = (n: DeviceNode) => (n.transport === 'file' ? 1 : 0)
+    return this.nodes.filter((n) => n.capabilities.includes(cap)).sort((a, b) => live(a) - live(b))
   }
 
   /** True when at least one connected device provides all of these. */
@@ -145,6 +147,12 @@ export class DeviceBus {
       },
       isArmed: (cap) => node.armed.includes(cap),
       signal: abort.signal,
+      stopped: (reason) => {
+        if (node.status !== 'streaming') return
+        node.status = 'idle'
+        this.fire({ type: 'log', deviceId: id, message: reason, at: Date.now() })
+        this.fire({ type: 'status', deviceId: id, at: Date.now() })
+      },
     }
 
     try {
@@ -359,6 +367,23 @@ export class DeviceBus {
     const entry = this.live.get(id)
     if (!entry) return
     this.dispatch(id, entry, { kind: 'audio', samples, sampleRate })
+  }
+
+  /**
+   * Publish a decoded record for a device from outside the driver.
+   *
+   * A decoder that turns a radio's iq into packets, readings or pictures runs
+   * in the panel, the same as the demodulation behind emitAudio, so its
+   * records come in here and reach the session log, the recorder and the
+   * automations as that device's own.
+   */
+  emitDecoded(
+    id: string,
+    draft: Extract<ArtifactDraft, { kind: 'packet' | 'reading' | 'blob' }>,
+  ): void {
+    const entry = this.live.get(id)
+    if (!entry) return
+    this.dispatch(id, entry, draft)
   }
 
   private dispatch(

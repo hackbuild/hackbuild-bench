@@ -40,6 +40,10 @@ export function transportSupport(): Record<TransportKind, TransportSupport> {
         ? 'an https page cannot call a plain http appliance. serve this app over http on localhost to reach it.'
         : undefined,
     },
+    file:
+      typeof File !== 'undefined'
+        ? { kind: 'file', available: true }
+        : { kind: 'file', available: false, reason: 'this browser cannot open files' },
     sim: { kind: 'sim', available: true },
   }
 }

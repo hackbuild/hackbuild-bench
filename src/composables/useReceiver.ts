@@ -15,7 +15,17 @@ const LEVEL_STEP_DB = 3
  *
  * The driver emits IQ, this turns it into audio, and the audio sink plays it.
  */
-export function useReceiver(deviceId: string) {
+export interface ReceiverOptions {
+  /**
+   * Start and stop the device's stream with listening. A panel that holds
+   * the stream another way, such as through a stream lease, passes false so
+   * listening never stops a stream it did not start.
+   */
+  ownsStream?: boolean
+}
+
+export function useReceiver(deviceId: string, opts: ReceiverOptions = {}) {
+  const ownsStream = opts.ownsStream ?? true
   const mode = ref<DemodMode>('fm')
   const signalDb = ref(-120)
   const listening = ref(false)
@@ -103,7 +113,7 @@ export function useReceiver(deviceId: string) {
     // playback needs the gesture that started it, so resume before streaming.
     await sink.value.resume()
     listening.value = true
-    await bus.start(deviceId, 'iq')
+    if (ownsStream) await bus.start(deviceId, 'iq')
   }
 
   async function halt(): Promise<void> {
@@ -111,6 +121,7 @@ export function useReceiver(deviceId: string) {
     // must not call it, another panel may be streaming.
     if (!listening.value) return
     listening.value = false
+    if (!ownsStream) return
     try {
       await bus.stop(deviceId)
     } catch {

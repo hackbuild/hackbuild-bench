@@ -9,6 +9,7 @@ import { esp32Driver } from './esp32'
 import { conduytDriver } from './conduyt'
 import { meshtasticDriver } from './meshtastic'
 import { pineappleDriver } from './pineapple'
+import { iqFileDriver } from './iqfile'
 
 /**
  * Every driver the bench knows about.
@@ -25,10 +26,16 @@ export const DRIVERS: DeviceDriver[] = [
   esp32Driver,
   meshtasticDriver,
   pineappleDriver,
+  iqFileDriver,
 ]
 
-/** One simulated twin per real driver, in the same order. */
-export const SIM_DRIVERS: DeviceDriver[] = DRIVERS.map(makeSimDriver)
+/**
+ * One simulated twin per real driver, in the same order. A recording is
+ * already a stand-in for a radio, so it has none.
+ */
+export const SIM_DRIVERS: DeviceDriver[] = DRIVERS.filter(
+  (d) => !d.descriptor.transports.includes('file'),
+).map(makeSimDriver)
 
 let installed = false
 

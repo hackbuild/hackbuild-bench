@@ -13,6 +13,7 @@ import { useBench } from '@/stores/bench'
 import { useDeviceStream } from '@/composables/useDeviceStream'
 import { useReceiver } from '@/composables/useReceiver'
 import { useSpectrumView } from '@/composables/useSpectrumView'
+import { useRds } from '@/composables/useRds'
 import { isSimKind } from '@/core/drivers/sim/simulate'
 import { formatHz, formatRate } from '@/core/format'
 import { BAND_PLAN } from '@/core/bandplan'
@@ -75,6 +76,25 @@ const markerWidth = computed(() => (span.value ? rx.bandwidthHz.value / span.val
 
 /** The frequency actually being demodulated, offset included. */
 const listeningHz = computed(() => centerHz.value + rx.offsetHz.value)
+
+/** RDS rides wideband fm only, and is decoded at the listening point. */
+const rdsOn = computed(() => rx.mode.value === 'fm' && streaming.value && rx.listening.value)
+const rds = useRds(props.deviceId, rdsOn, rx.offsetHz)
+const rdsName = computed(() => {
+  const s = rds.snapshot.value
+  if (!s) return ''
+  return (s.ps ?? s.psPartial).trim()
+})
+const rdsId = computed(() => {
+  const s = rds.snapshot.value
+  if (!s || s.pi === null) return ''
+  const pi = s.pi.toString(16).toUpperCase().padStart(4, '0')
+  return s.callSign ? `${s.callSign}${s.callSignUncertain ? '?' : ''} ${pi}` : pi
+})
+const rdsText = computed(() => {
+  const s = rds.snapshot.value
+  return s ? (s.rt ?? s.rtPartial).trim() : ''
+})
 
 const STEPS = [
   { label: '1 kHz', value: 1000 },
@@ -393,6 +413,21 @@ onBeforeUnmount(() => {
       outside what this radio tunes: {{ unreachable.join(', ') }}. it covers
       {{ formatHz(centerSpec.min) }} to {{ formatHz(centerSpec.max) }}.
     </p>
+
+    <div
+      v-if="rdsOn && rds.present.value"
+      class="bn-rds"
+      role="status"
+      :aria-label="`rds: ${rdsName || 'no name yet'}, ${rdsId}, ${rds.snapshot.value?.ptyName ?? ''}`"
+    >
+      <span class="bn-rds-ps">{{ rdsName || '--------' }}</span>
+      <span class="bn-rds-id">{{ rdsId }}</span>
+      <span v-if="rds.snapshot.value?.ptyName" class="bn-rds-tag">{{ rds.snapshot.value.ptyName }}</span>
+      <span v-if="rds.snapshot.value?.ta" class="bn-rds-tag">traffic</span>
+      <div class="bn-rds-rt" :title="rdsText">
+        <span :key="rdsText" :class="{ 'is-long': rdsText.length > 28 }">{{ rdsText || 'no radiotext yet' }}</span>
+      </div>
+    </div>
 
     <div class="bn-dial">
       <div role="group" :aria-label="`listening at ${formatHz(listeningHz, 4)}`">

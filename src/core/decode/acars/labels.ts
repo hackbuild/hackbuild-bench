@@ -1,0 +1,80 @@
+/**
+ * What the common ACARS labels carry, from ARINC 618 and 620.
+ *
+ * Labels in the 80s and many H1 payloads are airline defined, so the name
+ * says where a message is going and rarely what it means.
+ */
+const LABELS: Record<string, string> = {
+  _d: 'no information to transmit',
+  Q0: 'link test',
+  Q1: 'departure and arrival report',
+  Q2: 'eta report',
+  Q3: 'clock update advisory',
+  Q4: 'voice circuit busy',
+  Q5: 'unable to deliver uplink',
+  Q6: 'voice to data changeover',
+  Q7: 'delay message',
+  QA: 'out and fuel report',
+  QB: 'off report',
+  QC: 'on report',
+  QD: 'in and fuel report',
+  QE: 'out, fuel and destination report',
+  QF: 'off and destination report',
+  QG: 'out and return in report',
+  QH: 'out report',
+  QK: 'landing report',
+  QL: 'arrival report',
+  QM: 'arrival information report',
+  QN: 'diversion report',
+  QP: 'out report',
+  QQ: 'off report',
+  QR: 'on report',
+  QS: 'in report',
+  QT: 'out and return in report',
+  QX: 'intercept, unable to process',
+  H1: 'message to or from a terminal',
+  H2: 'meteorological report',
+  SA: 'media advisory',
+  SQ: 'ground station squitter',
+  '5D': 'atis request',
+  '5P': 'acars suspended',
+  '5R': 'position report',
+  '5U': 'weather request',
+  '5V': 'vdl switch advisory',
+  '5Y': 'eta revision or diversion',
+  '5Z': 'airline designated downlink',
+  '54': 'voice contact request',
+  '57': 'alternate position report',
+  '15': 'position report',
+  '16': 'weather request',
+  '20': 'initialization',
+  '30': 'position report',
+  '80': 'airline defined',
+  A1: 'oceanic clearance',
+  A2: 'departure clearance',
+  A3: 'departure clearance',
+  A4: 'departure clearance acknowledged',
+  A6: 'ads report request',
+  A7: 'free text from atc',
+  A9: 'atis',
+  AA: 'atc communication',
+  B1: 'oceanic clearance request',
+  B2: 'oceanic clearance readback',
+  B3: 'departure clearance request',
+  B4: 'departure clearance readback',
+  B6: 'ads report',
+  B9: 'atis request',
+  BA: 'atc communication',
+  C1: 'cockpit printer',
+  F3: 'dedicated transceiver advisory',
+  RA: 'command to aircraft terminal',
+  RB: 'response from aircraft terminal',
+  ':;': 'retune to another frequency',
+}
+
+export function labelName(label: string): string {
+  if (LABELS[label]) return LABELS[label]
+  if (label[0] === 'C') return 'cockpit printer'
+  if (label[0] === '8') return 'airline defined'
+  return ''
+}

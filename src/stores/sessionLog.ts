@@ -26,15 +26,35 @@ export interface LogEntry {
 
 const CAP = 2000
 
+/** How long a burst of entries may wait before it shows in the list. */
+const FLUSH_MS = 100
+
 export const useSessionLog = defineStore('sessionLog', () => {
   const entries = ref<LogEntry[]>([])
   const recording = ref(false)
   const startedAt = ref(0)
   let counter = 0
 
+  /**
+   * Entries waiting to join the list, oldest first. A decoder can publish
+   * hundreds of packets a second, and rebuilding the capped list for each one
+   * costs a copy of the whole list every time, so they join in batches.
+   */
+  let pending: LogEntry[] = []
+  let flushTimer: ReturnType<typeof setTimeout> | null = null
+
+  function flush(): void {
+    flushTimer = null
+    if (!pending.length) return
+    const fresh = pending.reverse()
+    pending = []
+    entries.value = [...fresh, ...entries.value].slice(0, CAP)
+  }
+
   function push(kind: LogKind, source: string, message: string): void {
-    entries.value = [{ id: ++counter, at: Date.now(), kind, source, message }, ...entries.value]
-    if (entries.value.length > CAP) entries.value = entries.value.slice(0, CAP)
+    pending.push({ id: ++counter, at: Date.now(), kind, source, message })
+    if (pending.length > CAP) pending.splice(0, pending.length - CAP)
+    if (!flushTimer) flushTimer = setTimeout(flush, FLUSH_MS)
   }
 
   function label(deviceId: string): string {

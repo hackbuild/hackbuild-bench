@@ -20,6 +20,11 @@ export interface DriverContext {
   isArmed(cap: Capability): boolean
   /** Cancelled when the device stops or closes. */
   signal: AbortSignal
+  /**
+   * The stream ended without anyone asking, such as a recording reaching its
+   * end, so the bus can show the device as idle instead of streaming.
+   */
+  stopped?(reason: string): void
 }
 
 export interface DeviceSession {

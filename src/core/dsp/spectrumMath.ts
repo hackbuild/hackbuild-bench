@@ -222,3 +222,14 @@ export function holeBetween(r: Reach, lowHz: number, highHz: number): [number, n
   }
   return [Math.max(lowHz, r.min), Math.min(highHz, r.max)]
 }
+
+/**
+ * The window a device that cannot retune holds, such as a recording: its
+ * centre is fixed, so what it carries is the centre plus and minus half its
+ * rate, less a guard for the filter roll off at the edges. Null for a device
+ * that tunes.
+ */
+export function fixedWindow(r: Reach, sampleRate: number, guardHz = 0): [number, number] | null {
+  if (r.spans?.length || r.min !== r.max || !(sampleRate > 0)) return null
+  return [r.min - sampleRate / 2 + guardHz, r.min + sampleRate / 2 - guardHz]
+}

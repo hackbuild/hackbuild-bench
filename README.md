@@ -24,6 +24,7 @@ Supported today:
 | ESP32 | Web Serial | serial console, auto baud |
 | Conduyt board | Web Serial, Web Bluetooth | pin grid, pwm, i2c scan and read, datastreams, plus whatever modules the board reports (servo, neopixel) |
 | WiFi Pineapple | HTTP | passive survey, client and access point inventory |
+| IQ recording | file | plays a .cu8, .cs8, .cs16, .cf32 or iq .wav recording into every radio tool |
 
 The RTL-SDR driver runs every tuner librtlsdr does:
 
@@ -46,6 +47,20 @@ reaches.
 - The bias tee knob puts dc on the antenna port, for a powered lna. It always
   starts off.
 
+Decoders run on any radio that streams iq, and on recordings:
+
+| tab | what it decodes | where |
+|---|---|---|
+| sky | ADS-B aircraft on a radar and a table | 1090 MHz, out of reach of the FC0012 and FC2580 |
+| acars | aircraft text messages, several channels at once | VHF airband, 129 to 132 MHz |
+| ships | AIS vessel positions, names and destinations | 161.975 and 162.025 MHz |
+| balloons | RS41 weather balloon position, altitude and climb | 400 to 406 MHz |
+| pagers | POCSAG and FLEX pages | 152 to 159 and 929 to 932 MHz |
+| sensors | weather stations, temperature probes, TPMS, remotes, rtl_433 style | 433.92, 315 and 915 MHz |
+| alerts | NOAA Weather Radio SAME headers, with the audio | 162.400 to 162.550 MHz |
+| weather sat | Meteor-M LRPT images, and NOAA APT from archived recordings | 137.1 and 137.9 MHz |
+| tune | FM station name, PI and call sign, radiotext and clock over RDS | FM broadcast |
+
 The spectrum tab measures as well as draws. It has:
 
 - a frequency axis and band plan
@@ -54,6 +69,8 @@ The spectrum tab measures as well as draws. It has:
 - noise floor, snr and rbw readouts
 - png and csv export
 - a stepped sweep that stitches a range wider than the radio sees at once
+- record iq, which saves the raw samples to a .cu8 file named with its
+  centre and rate, so the IQ recording device can play it back later
 
 Conduyt is free firmware you flash onto a maker board you already have. Flash it
 at conduyt.io/playground and the board comes back here as a conduyt node.

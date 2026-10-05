@@ -12,8 +12,9 @@ import { useDevices } from '@/stores/devices'
 import { useBench } from '@/stores/bench'
 import { useSpectrumView, AVERAGES, FFT_SIZES, WINDOWS } from '@/composables/useSpectrumView'
 import { useSweep } from '@/composables/useSweep'
+import { useIqRecorder } from '@/composables/useIqRecorder'
 import { isSimKind } from '@/core/drivers/sim/simulate'
-import { formatHz } from '@/core/format'
+import { formatBytes, formatDuration, formatHz } from '@/core/format'
 import { BAND_PLAN } from '@/core/bandplan'
 import { CAPABILITIES } from '@/core/capabilities'
 import {
@@ -36,6 +37,7 @@ const devices = useDevices()
 const bench = useBench()
 const view = useSpectrumView(props.deviceId)
 const sweeper = useSweep(props.deviceId, (p) => view.feed(p.bins, p.centerHz, p.spanHz))
+const recorder = useIqRecorder(props.deviceId)
 
 const node = computed(() => devices.nodes.find((n) => n.id === props.deviceId) ?? null)
 const streaming = computed(() => node.value?.status === 'streaming')
@@ -50,6 +52,32 @@ const hardwareSweep = computed(() => params.value.some((p) => p.key === 'sweepLo
 const tunable = computed(() => params.value.some((p) => p.key === 'centerHz'))
 const hasIq = computed(() => node.value?.capabilities.includes(CAPABILITIES.CAPTURE_IQ) ?? false)
 const canSweep = computed(() => hardwareSweep.value || (tunable.value && hasIq.value))
+/** Raw samples can be saved from a live radio. A recording already is one. */
+const canRecord = computed(() => hasIq.value && node.value?.transport !== 'file')
+
+async function toggleRecording(): Promise<void> {
+  if (recorder.recording.value) {
+    await recorder.stop()
+    return
+  }
+  // the save picker needs the click that opened it, so it comes before the
+  // radio, and a cancelled picker leaves the radio as it was.
+  try {
+    await recorder.start()
+    if (!recorder.recording.value) return
+    // a recording only holds samples that arrive, so the radio has to be running.
+    if (!streaming.value) {
+      view.release()
+      await devices.start(props.deviceId, 'spectrum')
+      startedHere = true
+    }
+  } catch (err) {
+    await recorder.stop()
+    recordError.value = err instanceof Error ? err.message : String(err)
+  }
+}
+
+const recordError = ref<string | null>(null)
 
 type Mode = 'live' | 'sweep'
 const mode = ref<Mode>('live')
@@ -515,6 +543,20 @@ onBeforeUnmount(() => {
       <HbButton v-if="m1 !== null" size="sm" variant="secondary" @click="clearMarkers">clear</HbButton>
       <span class="bn-sep" aria-hidden="true"></span>
       <HbButton v-if="zoomed" size="sm" variant="secondary" @click="view.fit()">zoom out</HbButton>
+      <button
+        v-if="canRecord && mode === 'live'"
+        type="button"
+        class="bn-pack"
+        :class="{ 'is-on': recorder.recording.value }"
+        :aria-pressed="recorder.recording.value"
+        @click="toggleRecording"
+      >
+        {{
+          recorder.recording.value
+            ? `recording iq ${formatDuration(recorder.seconds.value * 1000)} ${formatBytes(recorder.bytes.value)}`
+            : 'record iq'
+        }}
+      </button>
       <HbButton size="sm" variant="secondary" :disabled="!view.bins.value" @click="exportPng">png</HbButton>
       <HbButton size="sm" variant="secondary" :disabled="!view.bins.value" @click="exportCsv">csv</HbButton>
     </div>
@@ -539,6 +581,15 @@ onBeforeUnmount(() => {
       <HbButton size="sm" type="submit">tune</HbButton>
     </form>
 
+    <p v-if="recordError" class="bn-note" role="alert">could not record: {{ recordError }}</p>
+    <p v-if="recorder.error.value" class="bn-note">recording stopped: {{ recorder.error.value }}</p>
+    <p v-else-if="recorder.recording.value && !recorder.streaming.value" class="bn-note">
+      this browser has no save picker, so the recording is held in memory and downloads when you
+      stop. it stops itself at 512 mb.
+    </p>
+    <p v-else-if="recorder.recording.value" class="bn-note">
+      the recording runs while this tab is open. switching tools ends it.
+    </p>
     <p v-if="sweepBad && mode === 'sweep'" class="bn-note">{{ sweepBad }}</p>
     <p v-else-if="typedBad && mode === 'live'" class="bn-note">
       that is not a frequency this radio tunes. try 146.52 or 433.92m.
