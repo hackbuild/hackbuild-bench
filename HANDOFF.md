@@ -34,6 +34,19 @@ yet:
   has deprecated and now forces onto Node 24
 - `ubuntu-latest` moves to Ubuntu 26 from 2026-10-19
 
+## where it stands, 2026-10-05
+
+Everything is pushed and live. The last three code changes:
+
+- `dcf8e56` eight decoder tabs, the iq player and recorder, and their audit
+- `26b60ae` the tv tab, which finds ATSC stations by pilot
+- `23aa5e8` the tv tab's analog picture view
+
+Nothing is uncommitted except `.claude/`, which stays out. The next likely
+asks are a live analog tv test when the Mesa ham repeater is on (see tv
+below), and an ADS-B run on the NESDR, the only stick here that reaches
+1090 MHz.
+
 ## running locally
 
 ```
@@ -135,7 +148,8 @@ Homebrew (`rtl_sdr`, `rtl_test`), with the raw bytes of both compared:
 
 - the probe found it after the gpio 4 reset, as `rtl_test` does
 - FM stations land on odd tenths at 2.4 and 2.048 Msps
-- the crystal reads about 11 ppm low
+- the crystal reads about 11 ppm low by FM. The tv tab's pilots, a sharper
+  ruler, put it at 8 to 9 ppm low as it warms. ppm 9 is stored for it.
 - tuning above 300 MHz flips the gpio 6 band filter and stays locked
 - AC power and the share of samples at the rails match `rtl_sdr` to within
   1 dB at every gain step
@@ -175,6 +189,22 @@ handling in a second, headless Chrome
 demo mode. Keep the windowed one for usb, which headless cannot reach. A
 pinia store edited during the session keeps its old instance across a hot
 reload, so reload the page after changing one.
+
+**When the grant is gone.** The usb grant lives in the Chrome profile. On
+2026-10-05 it was missing after the debug Chrome had been killed, and
+`DeviceAccess.deviceRequestPrompted` never fired. The native chooser then
+waits for a person, so ask the user to pick the stick. Nothing that fully
+reloads the page may happen while it is open, such as a new file in the
+tools registry, because a reload closes the chooser. For raw air captures
+with no browser at all, librtlsdr's `rtl_sdr` from Homebrew works, for
+example `rtl_sdr -f 421850000 -s 2400000 -g 19.2 -p 9 -n 24000000 out.cu8`.
+macOS lets only one program claim the stick, so close the browser's hold
+first.
+
+**Formatting.** The repo has no prettier config. Running prettier with its
+defaults rewrites files to double quotes and semicolons. Match the code by
+hand, single quotes and no semicolons, or pass `--single-quote --no-semi
+--print-width 120`.
 
 Do not trust FM centroids for a frequency check, since program audio moves
 them by kHz. Average the FM discriminator output with at least 300 kHz of
@@ -498,6 +528,8 @@ Written from the standards after reading the reference code:
 - Meteor LRPT, after SatDump (GPL-3.0), with the MIT meteor_demod and
   lrpt-encoder used as references
 - AIS and RS41
+- the tv pilot finder, from ATSC A/53, and the analog picture, from the
+  NTSC timing standard. Neither follows any one program's code.
 
 The more detailed note on librtlsdr follows. librtlsdr is GPL-2.0-or-later. The headers of `tuner_e4k.c`, `tuner_fc0012.c`,
 `tuner_fc0013.c` and `tuner_r82xx.c` say so, and `tuner_fc2580.c` carries
@@ -524,4 +556,16 @@ is open and belongs to the owner.
   under one tab is open.
 - `.claude/worktrees/` holds the agent worktrees the decoders were built in.
   They are untracked and must not be committed.
+- the analog picture's live tuning and its sound switch have not run on a
+  stick. Only synthetic signals and the silent 421.25 MHz capture have
+  been through it.
+- the analog picture is black and white. Colour sits 3.58 MHz above the
+  carrier, out of an rtl-sdr's window. A HackRF at 8 Msps would hold it,
+  which is unbuilt.
+- digital tv pictures are out of reach on an rtl-sdr. On a HackRF they
+  would need an 8VSB demodulator, plus bundled MPEG-2 and AC-3 decoders,
+  since browsers ship neither. Likely record then play, not live. Offered
+  to the user and not taken up.
+- rf 11 reads as wideband with no pilot in Phoenix. What it is was not
+  confirmed.
 - custom domain pending DNS
