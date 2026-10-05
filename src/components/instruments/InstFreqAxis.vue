@@ -69,16 +69,17 @@ function onUp(ev: PointerEvent): void {
   if (el.value?.hasPointerCapture(ev.pointerId)) el.value.releasePointerCapture(ev.pointerId)
 }
 
-/** Ctrl or cmd with the wheel zooms and shift pans, as over the trace. A bare wheel scrolls the page. */
+/** Ctrl or cmd with the wheel zooms and shift or a sideways scroll pans, as over the trace. A bare wheel scrolls the page. */
 function onWheel(ev: WheelEvent): void {
   if (!el.value) return
   const width = props.view[1] - props.view[0]
   if (ev.ctrlKey || ev.metaKey) {
     const r = el.value.getBoundingClientRect()
     const x = r.width > 0 ? (ev.clientX - r.left) / r.width : 0.5
-    emit('zoom', ev.deltaY < 0 ? 1.25 : 0.8, props.view[0] + x * width)
-  } else if (ev.shiftKey) {
-    emit('pan', (ev.deltaY > 0 ? 0.1 : -0.1) * width)
+    emit('zoom', Math.exp(-ev.deltaY * 0.004), props.view[0] + x * width)
+  } else if (ev.shiftKey || Math.abs(ev.deltaX) > Math.abs(ev.deltaY)) {
+    // macos turns shift and the wheel into a sideways scroll.
+    emit('pan', ((ev.deltaX || ev.deltaY) / 500) * width)
   } else return
   ev.preventDefault()
 }

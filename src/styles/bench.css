@@ -2771,6 +2771,94 @@ canvas {
 
 /* ---- spectrum furniture ------------------------------------------------- */
 
+/* the trace, the axis, the band plan and the waterfall share one stage, so
+   they read as one instrument. the parts inside drop their own borders. */
+.bn-spec {
+  background: var(--hb-void);
+  border: var(--hb-border) solid var(--hb-ink);
+  box-shadow: var(--hb-shadow-pink);
+  margin: var(--hb-s3) 0 var(--hb-s4);
+}
+.bn-spec > .bn-void,
+.bn-spec > .bn-axis,
+.bn-spec > .bn-bands {
+  border: 0;
+  border-top: 1px solid var(--hb-lit-dim);
+}
+.bn-spec-hd {
+  display: flex;
+  align-items: center;
+  gap: var(--hb-s2);
+  flex-wrap: wrap;
+  padding: var(--hb-s1) var(--hb-s2);
+  font-family: var(--hb-utility);
+  font-size: 9px;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--bn-label-void);
+}
+.bn-spec-title {
+  color: var(--hb-paper);
+}
+.bn-spec-note {
+  color: var(--hb-slime);
+}
+.bn-spec-tools {
+  margin-left: auto;
+  display: inline-flex;
+  align-items: center;
+  gap: var(--hb-s1);
+}
+.bn-spec-btn,
+.bn-spec-select {
+  font-family: var(--hb-utility);
+  font-size: 11px;
+  min-width: 26px;
+  height: 22px;
+  padding: 0 var(--hb-s1);
+  background: var(--hb-void);
+  color: var(--hb-paper);
+  border: 1px solid var(--hb-lit-dim);
+  cursor: pointer;
+}
+.bn-spec-btn:hover:not(:disabled),
+.bn-spec-select:hover {
+  border-color: var(--hb-paper);
+}
+.bn-spec-btn:disabled {
+  opacity: 0.35;
+  cursor: default;
+}
+.bn-spec-btn:focus-visible,
+.bn-spec-select:focus-visible {
+  outline: 2px solid var(--hb-pink);
+  outline-offset: 1px;
+}
+/* the keyboard handle on a trace has no look of its own until it has focus. */
+.bn-void > [role='slider']:focus-visible {
+  outline: 2px solid var(--hb-paper);
+  outline-offset: -2px;
+}
+.bn-spec-label {
+  margin-left: var(--hb-s2);
+}
+/* the passband over the waterfall. the history scrolls under it. */
+.bn-fall-band,
+.bn-fall-line {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  pointer-events: none;
+  background: var(--hb-pink);
+}
+.bn-fall-band {
+  opacity: 0.16;
+}
+.bn-fall-line {
+  width: 2px;
+  margin-left: -1px;
+}
+
 /* the readout under the pointer sits on the trace, so it carries its own void. */
 .bn-hover {
   position: absolute;
@@ -2869,11 +2957,15 @@ canvas {
   align-items: center;
   margin: var(--hb-s2) 0;
 }
-.bn-tools .bn-sep {
-  width: 1px;
-  align-self: stretch;
-  background: var(--hb-ink-4);
-  margin: 0 var(--hb-s1);
+/* a toolbar wraps between groups, never inside one on a wide screen. */
+.bn-tools {
+  column-gap: var(--hb-s4);
+}
+.bn-tgroup {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--hb-s1);
+  align-items: center;
 }
 
 .bn-goto {

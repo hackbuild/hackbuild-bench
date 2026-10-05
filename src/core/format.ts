@@ -9,6 +9,15 @@ export function formatHz(hz: number, decimals = 3): string {
   return `${hz.toFixed(0)} Hz`
 }
 
+/** A bandwidth or a step, with no trailing zeros: 200 kHz, 12.5 kHz, 2.7 kHz. */
+export function formatSpan(hz: number): string {
+  const trim = (v: number) => Number(v.toFixed(2)).toString()
+  const abs = Math.abs(hz)
+  if (abs >= 1e6) return `${trim(hz / 1e6)} MHz`
+  if (abs >= 1e3) return `${trim(hz / 1e3)} kHz`
+  return `${Math.round(hz)} Hz`
+}
+
 export function formatRate(sps: number): string {
   if (sps >= 1e6) return `${(sps / 1e6).toFixed(sps % 1e6 === 0 ? 0 : 1)} Msps`
   if (sps >= 1e3) return `${(sps / 1e3).toFixed(0)} ksps`

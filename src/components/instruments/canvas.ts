@@ -86,24 +86,6 @@ export function fitCanvas(canvas: HTMLCanvasElement, scale: boolean): Screen | n
   return { ctx, w: dw, h: dh, dpr, resized }
 }
 
-function byte(v: number): number {
-  return Math.max(0, Math.min(255, v)) | 0
-}
-
-/**
- * Waterfall colormap: black to red to magenta to orange to yellow.
- *
- * The floor stays dark. A lifted floor buries the noise floor a carrier reads
- * against. Values come from the readouts, not the colour.
- */
-export function heat(v: number): [number, number, number] {
-  const t = Math.max(0, Math.min(1, v))
-  // both blue branches have to meet at t = 0.5. a step there draws a contour
-  // across the picture wherever a signal crosses mid window.
-  const b = t < 0.5 ? t * 2 * 160 : (1 - t) * 2 * 160
-  return [byte(t * 3 * 255), byte((t - 0.35) * 2.2 * 255), byte(b)]
-}
-
 /**
  * Strongest bin in the slice of `bins` that falls on output column `x` of `w`.
  *
@@ -145,18 +127,18 @@ export function normalise(db: number, minDb: number, maxDb: number): number {
 export const SLOP = 4
 
 /** Marker movement per arrow key and per page key, as a fraction of the width. */
-export const KEY_STEP = 0.01
-export const PAGE_STEP = 0.1
+const KEY_STEP = 0.01
+const PAGE_STEP = 0.1
 
 /** Width of the keyboard handle that stands in for the marker, in CSS pixels. */
 export const HANDLE_PX = 24
 
-export function clamp01(v: number): number {
+function clamp01(v: number): number {
   return Math.max(0, Math.min(1, v))
 }
 
 /** 1 or -1 for an arrow key that moves the marker, 0 for anything else. */
-export function arrowStep(key: string): number {
+function arrowStep(key: string): number {
   if (key === 'ArrowRight' || key === 'ArrowUp') return 1
   if (key === 'ArrowLeft' || key === 'ArrowDown') return -1
   return 0
@@ -171,13 +153,6 @@ export function markerKeyTarget(key: string, centre: number): number | null {
   if (key === 'PageUp') return clamp01(centre + PAGE_STEP)
   if (key === 'PageDown') return clamp01(centre - PAGE_STEP)
   return null
-}
-
-/** Spoken form of the marker, since the picture it sits on carries no text. */
-export function markerReadout(marker: number | null, width: number): string {
-  const at = ((marker ?? 0.5) * 100).toFixed(1)
-  const wide = ((width ?? 0) * 100).toFixed(1)
-  return `listening ${at}% across the window, ${wide}% wide`
 }
 
 /**

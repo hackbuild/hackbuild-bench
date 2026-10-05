@@ -3,14 +3,9 @@ import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import {
   AutoRange,
   HANDLE_PX,
-  KEY_STEP,
-  SLOP,
-  arrowStep,
-  clamp01,
   fitCanvas,
   handleLeft,
   markerKeyTarget,
-  markerReadout,
   normalise,
   onReducedMotion,
   peakAt,
@@ -19,7 +14,11 @@ import {
   readTokens,
 } from './canvas'
 import type { ScreenTokens } from './canvas'
+import { useTuningPointer } from './useTuningPointer'
+import type { Band } from './useTuningPointer'
 import { dbTicks } from '@/core/dsp/spectrumMath'
+import { paletteLut } from '@/core/palettes'
+import type { PaletteName } from '@/core/palettes'
 import { formatHz } from '@/core/format'
 
 /** A labelled point on the trace, as a fraction of the whole span. */
@@ -42,9 +41,11 @@ interface Props {
   demo?: boolean
   /** Listening point as a fraction of the span. null draws no marker. */
   marker?: number | null
-  /** Passband width as a fraction of the span, centred on the marker. */
-  markerWidth?: number
-  /** Let a pointer move the marker and drag its edges. */
+  /** The passband around the marker, as fractions of the span measured from it. */
+  band?: Band
+  /** Text on the flag over the listening point. */
+  markerLabel?: string
+  /** Let a pointer move the listening point and drag the passband's edges. */
   interactive?: boolean
   /** A click places a pick instead of moving the marker. */
   pickable?: boolean
@@ -59,6 +60,8 @@ interface Props {
   markers?: ScopeMarker[]
   /** Label the dB gridlines. */
   dbAxis?: boolean
+  /** Fill under the trace in this colour map, matching the waterfall. */
+  palette?: PaletteName | null
 }
 
 const props = withDefaults(defineProps<Props>(), {
@@ -69,7 +72,8 @@ const props = withDefaults(defineProps<Props>(), {
   auto: true,
   demo: false,
   marker: null,
-  markerWidth: 0,
+  band: () => [0, 0] as Band,
+  markerLabel: '',
   interactive: false,
   pickable: false,
   view: () => [0, 1] as [number, number],
@@ -79,14 +83,17 @@ const props = withDefaults(defineProps<Props>(), {
   floor: null,
   markers: () => [],
   dbAxis: false,
+  palette: null,
 })
 
 const emit = defineEmits<{
-  tune: [fraction: number]
+  /** Move the listening point. snap is false while alt is held. */
+  tune: [fraction: number, snap: boolean]
+  /** New passband width as a fraction of the span. */
   width: [fraction: number]
   pick: [fraction: number]
-  /** One tuning step up or down, from the wheel. */
-  step: [dir: number]
+  /** Tuning steps up or down. fine asks for a tenth of a step. */
+  step: [steps: number, fine: boolean]
   /** Zoom by factor about a fraction of the span. */
   zoom: [factor: number, about: number]
   pan: [delta: number]
@@ -101,19 +108,32 @@ let raf = 0
 let phase = 0
 let observer: ResizeObserver | null = null
 let stopMotion: (() => void) | null = null
-/** Pointer position as a fraction of the drawn width, null when away. */
-const hoverX = ref<number | null>(null)
 
 const viewLo = computed(() => props.view[0])
 const viewW = computed(() => Math.max(1e-6, props.view[1] - props.view[0]))
 
-/** Screen fraction to span fraction and back. */
 function toSpan(x: number): number {
   return viewLo.value + x * viewW.value
 }
 function toScreen(f: number): number {
   return (f - viewLo.value) / viewW.value
 }
+
+const pointer = useTuningPointer({
+  el: canvas,
+  view: () => props.view,
+  marker: () => props.marker,
+  band: () => props.band,
+  role: () => (props.interactive ? 'tune' : props.pickable ? 'pick' : 'none'),
+  focus: () => handle.value?.focus({ preventScroll: true }),
+  onTune: (f, snap) => emit('tune', f, snap),
+  onWidth: (f) => emit('width', f),
+  onPick: (f) => emit('pick', f),
+  onStep: (n, fine) => emit('step', n, fine),
+  onZoom: (factor, about) => emit('zoom', factor, about),
+  onPan: (d) => emit('pan', d),
+})
+const { hoverX, dragging, cursor, handlers } = pointer
 
 /** The bins inside the view, so a zoomed trace spends every column on them. */
 function visible(bins: Float32Array): Float32Array {
@@ -128,12 +148,7 @@ function windowFor(bins: Float32Array | null): { minDb: number; maxDb: number } 
   return bins ? range.update(bins) : { minDb: props.minDb, maxDb: props.maxDb }
 }
 
-function graticule(
-  ctx: CanvasRenderingContext2D,
-  w: number,
-  h: number,
-  win: { minDb: number; maxDb: number },
-): void {
+function graticule(ctx: CanvasRenderingContext2D, w: number, h: number, win: { minDb: number; maxDb: number }): void {
   if (!tokens) return
   ctx.save()
   ctx.strokeStyle = tokens.dim
@@ -166,62 +181,94 @@ function graticule(
   ctx.restore()
 }
 
-function traceBins(
-  ctx: CanvasRenderingContext2D,
-  w: number,
-  h: number,
-  bins: Float32Array,
-  win: { minDb: number; maxDb: number },
-): void {
+/** The trace's height at each column, in canvas pixels from the top. */
+function traceYs(w: number, h: number, bins: Float32Array, win: { minDb: number; maxDb: number }): Float32Array {
   const full = viewW.value >= 0.999
-  ctx.beginPath()
+  const ys = new Float32Array(w)
   for (let x = 0; x < w; x++) {
     const v = full ? peakAt(bins, x, w) : peakBetween(bins, toSpan(x / w), toSpan((x + 1) / w))
-    const y = h - 2 - normalise(v, win.minDb, win.maxDb) * (h - 4)
-    if (x) ctx.lineTo(x, y)
-    else ctx.moveTo(x, y)
+    ys[x] = h - 2 - normalise(v, win.minDb, win.maxDb) * (h - 4)
   }
-  ctx.stroke()
+  return ys
 }
 
-function tracePlaceholder(ctx: CanvasRenderingContext2D, w: number, h: number): void {
-  ctx.beginPath()
+function placeholderYs(w: number, h: number): Float32Array {
+  const ys = new Float32Array(w)
+  const peaks = [0.3, 0.52, 0.76]
   for (let x = 0; x < w; x++) {
     let y = h - 5 - 4 * Math.sin(x * 0.03 + phase) - Math.random() * 3
-    const peaks = [0.3, 0.52, 0.76]
     for (let i = 0; i < peaks.length; i++) {
       const c = peaks[i] * w
       const width = 10 + i * 4
-      y -=
-        h *
-        0.6 *
-        Math.exp(-((x - c) * (x - c)) / (2 * width * width)) *
-        (0.7 + 0.3 * Math.sin(phase * 1.4 + i))
+      y -= h * 0.6 * Math.exp(-((x - c) * (x - c)) / (2 * width * width)) * (0.7 + 0.3 * Math.sin(phase * 1.4 + i))
     }
-    if (x) ctx.lineTo(x, y)
-    else ctx.moveTo(x, y)
+    ys[x] = y
+  }
+  return ys
+}
+
+function stroke(ctx: CanvasRenderingContext2D, ys: Float32Array): void {
+  ctx.beginPath()
+  for (let x = 0; x < ys.length; x++) {
+    if (x) ctx.lineTo(x, ys[x])
+    else ctx.moveTo(x, ys[x])
   }
   ctx.stroke()
 }
 
 /**
- * The listening point and the slice being demodulated around it. It draws
- * after the trace, so the overlay sits on top of the signal it marks.
+ * Fills under the trace in the waterfall's colour map, so a level reads the
+ * same colour in both. The colour follows height, which is level.
  */
+function fill(ctx: CanvasRenderingContext2D, ys: Float32Array, h: number): void {
+  if (!props.palette) return
+  const lut = paletteLut(props.palette)
+  const grad = ctx.createLinearGradient(0, h, 0, 0)
+  for (let i = 0; i <= 8; i++) {
+    const k = Math.round((i / 8) * 255) * 3
+    grad.addColorStop(i / 8, `rgba(${lut[k]}, ${lut[k + 1]}, ${lut[k + 2]}, ${0.25 + 0.5 * (i / 8)})`)
+  }
+  ctx.save()
+  ctx.beginPath()
+  ctx.moveTo(0, h)
+  for (let x = 0; x < ys.length; x++) ctx.lineTo(x, ys[x])
+  ctx.lineTo(ys.length - 1, h)
+  ctx.closePath()
+  ctx.fillStyle = grad
+  ctx.fill()
+  ctx.restore()
+}
+
+/** The listening point, the passband around it, and its flag. Drawn over the trace. */
 function drawMarker(ctx: CanvasRenderingContext2D, w: number, h: number): void {
   const m = props.marker
   if (m === null || m === undefined || !tokens) return
   const x = toScreen(m) * w
-  const band = Math.max(2, ((props.markerWidth ?? 0) / viewW.value) * w)
+  const lo = toScreen(m + props.band[0]) * w
+  const hi = toScreen(m + props.band[1]) * w
+  const active = dragging.value === 'low' || dragging.value === 'high'
   ctx.save()
   ctx.fillStyle = tokens.pink
-  ctx.globalAlpha = 0.15
-  ctx.fillRect(x - band / 2, 0, band, h)
-  ctx.globalAlpha = 0.5
-  ctx.fillRect(Math.round(x - band / 2) + 0.5, 0, 1, h)
-  ctx.fillRect(Math.round(x + band / 2) - 0.5, 0, 1, h)
+  ctx.globalAlpha = 0.16
+  ctx.fillRect(lo, 0, Math.max(2, hi - lo), h)
+  ctx.globalAlpha = active ? 1 : 0.6
+  if (props.band[0] < 0) ctx.fillRect(Math.round(lo) - 0.5, 0, 1, h)
+  if (props.band[1] > 0) ctx.fillRect(Math.round(hi) - 0.5, 0, 1, h)
   ctx.globalAlpha = 1
-  ctx.fillRect(Math.round(x) - 0.5, 0, 1, h)
+  ctx.fillRect(Math.round(x) - 1, 0, 2, h)
+  if (props.markerLabel) {
+    ctx.font = `15px ${tokens.readout}`
+    ctx.textBaseline = 'top'
+    const tw = ctx.measureText(props.markerLabel).width + 8
+    // the flag hangs off the line on whichever side has room.
+    const left = x + tw + 4 < w ? x + 2 : x - tw - 2
+    ctx.fillStyle = tokens.screen
+    ctx.fillRect(left, 2, tw, 18)
+    ctx.fillStyle = tokens.pink
+    ctx.fillRect(left, 2, 2, 18)
+    ctx.fillStyle = tokens.paper
+    ctx.fillText(props.markerLabel, left + 6, 3)
+  }
   ctx.restore()
 }
 
@@ -265,7 +312,7 @@ const hoverText = computed(() => {
 
 function drawHover(ctx: CanvasRenderingContext2D, w: number, h: number): void {
   const x = hoverX.value
-  if (x === null || !tokens || dragging) return
+  if (x === null || !tokens || dragging.value) return
   ctx.save()
   ctx.strokeStyle = tokens.paper
   ctx.globalAlpha = 0.35
@@ -287,148 +334,27 @@ function draw(): void {
   const live = props.bins && props.bins.length > 1 ? props.bins : null
   const win = windowFor(live ? visible(live) : null)
   graticule(ctx, w, h, win)
+  const ys = live ? traceYs(w, h, live, win) : props.demo ? placeholderYs(w, h) : null
+  if (ys) fill(ctx, ys, h)
   ctx.lineWidth = 1
   if (props.floor && props.floor.length > 1) {
     ctx.strokeStyle = tokens.dim
-    traceBins(ctx, w, h, props.floor, win)
+    stroke(ctx, traceYs(w, h, props.floor, win))
   }
   if (props.hold && props.hold.length > 1) {
     ctx.strokeStyle = tokens.slime
     ctx.globalAlpha = 0.7
-    traceBins(ctx, w, h, props.hold, win)
+    stroke(ctx, traceYs(w, h, props.hold, win))
     ctx.globalAlpha = 1
   }
-  ctx.strokeStyle = tokens.pink
-  ctx.lineWidth = 1.5
-  if (live) traceBins(ctx, w, h, live, win)
-  else if (props.demo) tracePlaceholder(ctx, w, h)
+  if (ys) {
+    ctx.strokeStyle = tokens.pink
+    ctx.lineWidth = 1.5
+    stroke(ctx, ys)
+  }
   drawMarker(ctx, w, h)
   drawMarkers(ctx, w, h)
   drawHover(ctx, w, h)
-}
-
-type Grab = 'centre' | 'low' | 'high'
-let dragging: Grab | null = null
-let downX = 0
-let moved = false
-/** Live pointers, for a two finger pinch. */
-const pointers = new Map<number, number>()
-let pinchFrom = 0
-
-function screenAt(clientX: number): number {
-  const el = canvas.value
-  if (!el) return 0.5
-  const r = el.getBoundingClientRect()
-  if (r.width <= 0) return 0.5
-  return Math.max(0, Math.min(1, (clientX - r.left) / r.width))
-}
-
-function fractionAt(ev: PointerEvent): number {
-  return toSpan(screenAt(ev.clientX))
-}
-
-function pinchSpread(): number {
-  const xs = [...pointers.values()]
-  return xs.length < 2 ? 0 : Math.abs(xs[0] - xs[1])
-}
-
-function onDown(ev: PointerEvent): void {
-  const el = canvas.value
-  if (!el) return
-  pointers.set(ev.pointerId, ev.clientX)
-  if (pointers.size === 2) {
-    // a second finger turns the gesture into a pinch and cancels any tune.
-    dragging = null
-    pinchFrom = pinchSpread()
-    el.setPointerCapture(ev.pointerId)
-    return
-  }
-  if (!props.interactive && !props.pickable) return
-  const r = el.getBoundingClientRect()
-  const f = fractionAt(ev)
-  const centre = props.marker ?? 0.5
-  const half = (props.markerWidth ?? 0) / 2
-  // within a few pixels of an edge grabs the edge, anywhere else retunes.
-  const grab = r.width > 0 ? (7 / r.width) * viewW.value : 0.01
-  if (props.interactive && half > 0 && Math.abs(f - (centre - half)) < grab) dragging = 'low'
-  else if (props.interactive && half > 0 && Math.abs(f - (centre + half)) < grab) dragging = 'high'
-  else dragging = 'centre'
-  downX = ev.clientX
-  moved = false
-  el.setPointerCapture(ev.pointerId)
-  ev.preventDefault()
-  // the pointer target and the keyboard target are different nodes, and
-  // preventDefault suppresses the focus a click would give the one it hit.
-  handle.value?.focus({ preventScroll: true })
-}
-
-function onMove(ev: PointerEvent): void {
-  if (pointers.has(ev.pointerId)) pointers.set(ev.pointerId, ev.clientX)
-  if (pointers.size === 2) {
-    const spread = pinchSpread()
-    if (pinchFrom > 8 && spread > 8 && Math.abs(spread - pinchFrom) > 6) {
-      const mid = [...pointers.values()].reduce((a, b) => a + b, 0) / 2
-      emit('zoom', spread / pinchFrom, toSpan(screenAt(mid)))
-      pinchFrom = spread
-    }
-    return
-  }
-  if (ev.pointerType === 'mouse') {
-    hoverX.value = screenAt(ev.clientX)
-    if (!raf) draw()
-  }
-  if (!dragging) return
-  if (dragging === 'centre') {
-    // a touch that becomes a page scroll must not tune on its way past.
-    if (!moved && Math.abs(ev.clientX - downX) <= SLOP) return
-    moved = true
-    place(fractionAt(ev))
-    return
-  }
-  emit('width', Math.abs(fractionAt(ev) - (props.marker ?? 0.5)) * 2)
-}
-
-/** A tuning trace moves the listening point, a measuring trace drops a pick. */
-function place(f: number): void {
-  if (props.interactive) emit('tune', f)
-  else emit('pick', f)
-}
-
-function onUp(ev: PointerEvent): void {
-  pointers.delete(ev.pointerId)
-  if (!dragging) return
-  if (dragging === 'centre' && !moved) place(fractionAt(ev))
-  onCancel(ev)
-}
-
-function onCancel(ev: PointerEvent): void {
-  pointers.delete(ev.pointerId)
-  if (!dragging) return
-  dragging = null
-  const el = canvas.value
-  if (el?.hasPointerCapture(ev.pointerId)) el.releasePointerCapture(ev.pointerId)
-}
-
-function onLeave(): void {
-  hoverX.value = null
-  if (!raf) draw()
-}
-
-/**
- * The wheel steps the listening point, ctrl or cmd with the wheel zooms about
- * the pointer, and shift with the wheel pans, as gqrx and SDR++ do.
- */
-function onWheel(ev: WheelEvent): void {
-  if (!props.interactive && !props.pickable) return
-  const about = toSpan(screenAt(ev.clientX))
-  if (ev.ctrlKey || ev.metaKey) {
-    emit('zoom', ev.deltaY < 0 ? 1.25 : 0.8, about)
-  } else if (ev.shiftKey) {
-    emit('pan', (ev.deltaY > 0 ? 0.1 : -0.1) * viewW.value)
-  } else if (props.interactive) {
-    emit('step', ev.deltaY < 0 ? 1 : -1)
-  } else return
-  ev.preventDefault()
 }
 
 /**
@@ -440,9 +366,7 @@ const hasHandle = computed(
 )
 
 /** Where the keyboard handle sits, as a fraction of the span. */
-const handleAt = computed(() =>
-  props.interactive ? (props.marker ?? 0.5) : (props.markers[0]?.at ?? toSpan(0.5)),
-)
+const handleAt = computed(() => (props.interactive ? (props.marker ?? 0.5) : (props.markers[0]?.at ?? toSpan(0.5))))
 
 const markerNow = computed(() => Number(handleAt.value.toFixed(3)))
 
@@ -453,48 +377,32 @@ const markerText = computed(() => {
     if (!(props.highHz > props.lowHz)) return `marker ${(at * 100).toFixed(1)}% across`
     return `marker at ${formatHz(props.lowHz + at * (props.highHz - props.lowHz), 4)}`
   }
-  if (props.highHz > props.lowHz && props.marker !== null) {
-    const span = props.highHz - props.lowHz
-    const hz = props.lowHz + (props.marker ?? 0.5) * span
-    return `listening at ${formatHz(hz, 4)}, ${formatHz((props.markerWidth ?? 0) * span, 1)} wide`
-  }
-  return markerReadout(props.marker, props.markerWidth)
+  if (props.markerLabel) return `listening at ${props.markerLabel}`
+  return `listening ${((props.marker ?? 0.5) * 100).toFixed(1)}% across the window`
 })
 
+/**
+ * Keys on a tuning trace: arrows step, shift with them steps finely, page up
+ * and down step ten, the square brackets narrow and widen the passband, home
+ * goes back to the centre, plus and minus zoom.
+ */
 function onKey(ev: KeyboardEvent): void {
-  if (ev.key === '+' || ev.key === '=') {
-    emit('zoom', 1.5, props.marker ?? 0.5)
-    ev.preventDefault()
-    return
-  }
-  if (ev.key === '-' || ev.key === '_') {
-    emit('zoom', 1 / 1.5, props.marker ?? 0.5)
-    ev.preventDefault()
-    return
-  }
-  if (ev.key === '[' || ev.key === ']') {
-    if (props.interactive) emit('step', ev.key === ']' ? 1 : -1)
-    else emit('pan', (ev.key === ']' ? 0.1 : -0.1) * viewW.value)
-    ev.preventDefault()
-    return
-  }
-  if (!props.interactive) {
+  const zoomAbout = props.interactive ? (props.marker ?? 0.5) : handleAt.value
+  if (ev.key === '+' || ev.key === '=') emit('zoom', 1.5, zoomAbout)
+  else if (ev.key === '-' || ev.key === '_') emit('zoom', 1 / 1.5, zoomAbout)
+  else if (!props.interactive) {
     const next = markerKeyTarget(ev.key, toScreen(handleAt.value))
     if (next === null) return
     emit('pick', toSpan(next))
-    ev.preventDefault()
-    return
-  }
-  const dir = arrowStep(ev.key)
-  if (ev.shiftKey) {
-    if (!dir) return
-    emit('width', clamp01((props.markerWidth ?? 0) + dir * KEY_STEP * viewW.value))
-    ev.preventDefault()
-    return
-  }
-  const next = markerKeyTarget(ev.key, toScreen(props.marker ?? 0.5))
-  if (next === null) return
-  emit('tune', toSpan(next))
+  } else if (ev.key === 'ArrowRight' || ev.key === 'ArrowUp') emit('step', 1, ev.shiftKey)
+  else if (ev.key === 'ArrowLeft' || ev.key === 'ArrowDown') emit('step', -1, ev.shiftKey)
+  else if (ev.key === 'PageUp') emit('step', 10, false)
+  else if (ev.key === 'PageDown') emit('step', -10, false)
+  else if (ev.key === '[' || ev.key === ']') {
+    const width = props.band[1] - props.band[0]
+    emit('width', width * (ev.key === ']' ? 1.25 : 0.8))
+  } else if (ev.key === 'Home') emit('tune', 0.5, false)
+  else return
   ev.preventDefault()
 }
 
@@ -542,12 +450,22 @@ watch(
     props.minDb,
     props.maxDb,
     props.marker,
-    props.markerWidth,
+    props.band,
+    props.markerLabel,
     props.view,
     props.hold,
     props.floor,
     props.markers,
+    props.palette,
+    hoverX.value,
+    dragging.value,
   ],
+  () => {
+    if (!raf) draw()
+  },
+)
+watch(
+  () => [props.demo, props.bins === null],
   () => restart(),
 )
 
@@ -562,19 +480,16 @@ watch(
     <canvas
       ref="canvas"
       style="height: 100%"
-      :style="{
-        touchAction: interactive || pickable ? 'pan-y' : undefined,
-        cursor: interactive ? 'ew-resize' : pickable ? 'crosshair' : undefined,
-      }"
+      :style="{ touchAction: interactive || pickable ? 'pan-y' : undefined, cursor }"
       :role="hasHandle ? undefined : 'img'"
       :aria-label="hasHandle ? undefined : 'spectrum trace'"
       :aria-hidden="hasHandle ? 'true' : undefined"
-      @pointerdown="onDown"
-      @pointermove="onMove"
-      @pointerup="onUp"
-      @pointercancel="onCancel"
-      @pointerleave="onLeave"
-      @wheel="onWheel"
+      @pointerdown="handlers.onDown"
+      @pointermove="handlers.onMove"
+      @pointerup="handlers.onUp"
+      @pointercancel="handlers.onCancel"
+      @pointerleave="handlers.onLeave"
+      @wheel="handlers.onWheel"
     ></canvas>
     <span v-if="hoverText" class="bn-hover" aria-hidden="true">{{ hoverText }}</span>
     <div
@@ -583,7 +498,7 @@ watch(
       role="slider"
       tabindex="0"
       :aria-label="interactive ? 'listening point, spectrum' : 'measurement marker, spectrum'"
-      aria-keyshortcuts="ArrowLeft ArrowRight [ ] + -"
+      :aria-keyshortcuts="interactive ? 'ArrowLeft ArrowRight Shift+ArrowLeft Shift+ArrowRight PageUp PageDown [ ] Home + -' : 'ArrowLeft ArrowRight Home End + -'"
       :aria-valuemin="0"
       :aria-valuemax="1"
       :aria-valuenow="markerNow"

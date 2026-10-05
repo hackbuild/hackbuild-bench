@@ -1,12 +1,9 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, ref, useId, watch } from 'vue'
 import { HbButton, HbFold, HbIcon, HbInput, HbSelect, HbSwitch } from '@virgilvox/hackbuild-ui'
-import InstScope from '@/components/instruments/InstScope.vue'
+import InstSpectrum from '@/components/instruments/InstSpectrum.vue'
 import type { ScopeMarker } from '@/components/instruments/InstScope.vue'
-import InstWaterfall from '@/components/instruments/InstWaterfall.vue'
 import InstKnob from '@/components/instruments/InstKnob.vue'
-import InstFreqAxis from '@/components/instruments/InstFreqAxis.vue'
-import InstBandStrip from '@/components/instruments/InstBandStrip.vue'
 import InstSweepBar from '@/components/instruments/InstSweepBar.vue'
 import { useDevices } from '@/stores/devices'
 import { useBench } from '@/stores/bench'
@@ -302,8 +299,6 @@ async function halt(): Promise<void> {
 // display settings
 // ---------------------------------------------------------------------------
 
-const zoomed = computed(() => view.view.value[1] - view.view.value[0] < 0.999)
-
 const MODES: Array<{ label: string; value: Mode }> = [
   { label: 'live', value: 'live' },
   { label: 'sweep', value: 'sweep' },
@@ -425,7 +420,7 @@ onBeforeUnmount(() => {
 
 <template>
   <div ref="root">
-    <div class="bn-meta" style="margin-top: 0">
+    <div class="bn-meta">
       <div>
         <div class="bn-k">start</div>
         <div class="bn-v">{{ formatHz(shownLow, 3) }}</div>
@@ -468,97 +463,101 @@ onBeforeUnmount(() => {
       </div>
     </div>
 
-    <div class="bn-tools" role="group" aria-label="spectrum controls">
-      <HbButton v-if="!running" variant="danger" size="sm" @click="start">
-        <template #icon><HbIcon name="wave-square" /></template>
-        {{ mode === 'sweep' ? 'sweep' : 'run' }}
-      </HbButton>
-      <HbButton v-else size="sm" @click="halt">
-        <template #icon><HbIcon name="stop" /></template>
-        stop
-      </HbButton>
-      <div v-if="canSweep" class="bn-seg2" role="group" aria-label="what to show">
-        <button
-          v-for="m in MODES"
-          :key="m.value"
-          type="button"
-          :class="{ 'is-on': mode === m.value }"
-          :aria-pressed="mode === m.value"
-          @click="mode = m.value"
-        >
-          {{ m.label }}
-        </button>
+    <div class="bn-tools">
+      <div class="bn-tgroup" role="group" aria-label="run">
+        <HbButton v-if="!running" variant="danger" size="sm" @click="start">
+          <template #icon><HbIcon name="wave-square" /></template>
+          {{ mode === 'sweep' ? 'sweep' : 'run' }}
+        </HbButton>
+        <HbButton v-else size="sm" @click="halt">
+          <template #icon><HbIcon name="stop" /></template>
+          stop
+        </HbButton>
+        <div v-if="canSweep" class="bn-seg2" role="group" aria-label="what to show">
+          <button
+            v-for="m in MODES"
+            :key="m.value"
+            type="button"
+            :class="{ 'is-on': mode === m.value }"
+            :aria-pressed="mode === m.value"
+            @click="mode = m.value"
+          >
+            {{ m.label }}
+          </button>
+        </div>
       </div>
-      <span class="bn-sep" aria-hidden="true"></span>
-      <button
-        type="button"
-        class="bn-pack"
-        :class="{ 'is-on': view.holdMax.value }"
-        :aria-pressed="view.holdMax.value"
-        @click="view.holdMax.value = !view.holdMax.value"
-      >
-        max hold
-      </button>
-      <button
-        type="button"
-        class="bn-pack"
-        :class="{ 'is-on': view.holdMin.value }"
-        :aria-pressed="view.holdMin.value"
-        @click="view.holdMin.value = !view.holdMin.value"
-      >
-        min hold
-      </button>
-      <button
-        type="button"
-        class="bn-pack"
-        :class="{ 'is-on': view.frozen.value }"
-        :aria-pressed="view.frozen.value"
-        @click="view.frozen.value = !view.frozen.value"
-      >
-        freeze
-      </button>
-      <HbSelect v-model="view.average.value" :options="avgOptions" aria-label="averaging" />
-      <span class="bn-sep" aria-hidden="true"></span>
-      <HbButton size="sm" variant="secondary" :disabled="!view.bins.value" @click="toPeak">peak</HbButton>
-      <HbButton size="sm" variant="secondary" :disabled="!view.bins.value" @click="toNextPeak">next peak</HbButton>
-      <button
-        type="button"
-        class="bn-pack"
-        :class="{ 'is-on': delta }"
-        :aria-pressed="delta"
-        :disabled="!view.bins.value"
-        @click="toggleDelta"
-      >
-        delta
-      </button>
-      <HbButton
-        v-if="tunable && mode === 'live'"
-        size="sm"
-        variant="secondary"
-        :disabled="m1 === null"
-        @click="markerToCentre"
-      >
-        tune to marker
-      </HbButton>
-      <HbButton v-if="m1 !== null" size="sm" variant="secondary" @click="clearMarkers">clear</HbButton>
-      <span class="bn-sep" aria-hidden="true"></span>
-      <HbButton v-if="zoomed" size="sm" variant="secondary" @click="view.fit()">zoom out</HbButton>
-      <button
-        v-if="canRecord && mode === 'live'"
-        type="button"
-        class="bn-pack"
-        :class="{ 'is-on': recorder.recording.value }"
-        :aria-pressed="recorder.recording.value"
-        @click="toggleRecording"
-      >
-        {{
-          recorder.recording.value
-            ? `recording iq ${formatDuration(recorder.seconds.value * 1000)} ${formatBytes(recorder.bytes.value)}`
-            : 'record iq'
-        }}
-      </button>
-      <HbButton size="sm" variant="secondary" :disabled="!view.bins.value" @click="exportPng">png</HbButton>
-      <HbButton size="sm" variant="secondary" :disabled="!view.bins.value" @click="exportCsv">csv</HbButton>
+      <div class="bn-tgroup" role="group" aria-label="trace">
+        <button
+          type="button"
+          class="bn-pack"
+          :class="{ 'is-on': view.holdMax.value }"
+          :aria-pressed="view.holdMax.value"
+          @click="view.holdMax.value = !view.holdMax.value"
+        >
+          max hold
+        </button>
+        <button
+          type="button"
+          class="bn-pack"
+          :class="{ 'is-on': view.holdMin.value }"
+          :aria-pressed="view.holdMin.value"
+          @click="view.holdMin.value = !view.holdMin.value"
+        >
+          min hold
+        </button>
+        <button
+          type="button"
+          class="bn-pack"
+          :class="{ 'is-on': view.frozen.value }"
+          :aria-pressed="view.frozen.value"
+          @click="view.frozen.value = !view.frozen.value"
+        >
+          freeze
+        </button>
+        <HbSelect v-model="view.average.value" :options="avgOptions" aria-label="averaging" />
+      </div>
+      <div class="bn-tgroup" role="group" aria-label="markers">
+        <HbButton size="sm" variant="secondary" :disabled="!view.bins.value" @click="toPeak">peak</HbButton>
+        <HbButton size="sm" variant="secondary" :disabled="!view.bins.value" @click="toNextPeak">next peak</HbButton>
+        <button
+          type="button"
+          class="bn-pack"
+          :class="{ 'is-on': delta }"
+          :aria-pressed="delta"
+          :disabled="!view.bins.value"
+          @click="toggleDelta"
+        >
+          delta
+        </button>
+        <HbButton
+          v-if="tunable && mode === 'live'"
+          size="sm"
+          variant="secondary"
+          :disabled="m1 === null"
+          @click="markerToCentre"
+        >
+          tune to marker
+        </HbButton>
+        <HbButton v-if="m1 !== null" size="sm" variant="secondary" @click="clearMarkers">clear</HbButton>
+      </div>
+      <div class="bn-tgroup" role="group" aria-label="save">
+        <button
+          v-if="canRecord && mode === 'live'"
+          type="button"
+          class="bn-pack"
+          :class="{ 'is-on': recorder.recording.value }"
+          :aria-pressed="recorder.recording.value"
+          @click="toggleRecording"
+        >
+          {{
+            recorder.recording.value
+              ? `recording iq ${formatDuration(recorder.seconds.value * 1000)} ${formatBytes(recorder.bytes.value)}`
+              : 'record iq'
+          }}
+        </button>
+        <HbButton size="sm" variant="secondary" :disabled="!view.bins.value" @click="exportPng">png</HbButton>
+        <HbButton size="sm" variant="secondary" :disabled="!view.bins.value" @click="exportCsv">csv</HbButton>
+      </div>
     </div>
 
     <form v-if="mode === 'sweep'" class="bn-goto" @submit.prevent="start">
@@ -594,7 +593,7 @@ onBeforeUnmount(() => {
     <p v-else-if="typedBad && mode === 'live'" class="bn-note">
       that is not a frequency this radio tunes. try 146.52 or 433.92m.
     </p>
-    <p v-else-if="mode === 'sweep' && !hardwareSweep" class="bn-note" style="margin-top: 4px">
+    <p v-else-if="mode === 'sweep' && !hardwareSweep" class="bn-note sp-help">
       sweep retunes the radio across the range and stitches each window into one picture.
       a pass across 20 mhz takes a few seconds, and the radio goes back where it was when
       you stop.
@@ -610,48 +609,31 @@ onBeforeUnmount(() => {
       idle. the radio is connected but not sampling anything. press run.
     </p>
 
-    <InstScope
+    <InstSpectrum
+      v-model:palette="bench.palette"
+      :title="mode === 'sweep' ? 'sweep' : 'spectrum'"
       :bins="view.bins.value"
-      :height="220"
-      ruled
-      db-axis
-      pickable
-      :auto="false"
       :min-db="view.minDb.value"
       :max-db="view.maxDb.value"
       :demo="placeholder"
       :view="view.view.value"
       :low-hz="lowHz"
       :high-hz="highHz"
+      pickable
       :hold="view.maxBins.value"
       :floor="view.minBins.value"
       :markers="markers"
+      :bands="BAND_PLAN"
+      :row-every="rowEvery"
+      :trace-height="230"
+      :fall-height="170"
       @pick="onPick"
       @zoom="view.zoom"
       @pan="view.pan"
-    />
-    <InstFreqAxis
-      v-if="spanHz"
-      :low-hz="lowHz"
-      :high-hz="highHz"
-      :view="view.view.value"
-      @pan="view.pan"
-      @zoom="view.zoom"
-    />
-    <InstBandStrip v-if="spanHz" :low-hz="lowHz" :high-hz="highHz" :view="view.view.value" :bands="BAND_PLAN" />
-    <InstWaterfall
-      :bins="view.bins.value"
-      :height="140"
-      :auto="false"
-      :min-db="view.minDb.value"
-      :max-db="view.maxDb.value"
-      :demo="placeholder"
-      :view="view.view.value"
-      :row-every="rowEvery"
-      style="margin-top: 8px"
+      @fit="view.fit"
     />
 
-    <p class="bn-note" style="margin-top: 6px">
+    <p class="bn-note sp-help">
       click the trace to drop a marker, or focus it and use the arrows. ctrl and the wheel
       zooms, shift and the wheel or a drag on the axis pans, two fingers pinch, and plus
       and minus zoom from the keyboard.
@@ -690,7 +672,7 @@ onBeforeUnmount(() => {
           :spec="{ key: 'range', label: 'range', unit: 'dB', min: 10, max: 140, step: 5, default: 80 }"
         />
       </div>
-      <p v-if="!view.local.value" class="bn-note" style="margin-top: 0">
+      <p v-if="!view.local.value" class="bn-note sp-help">
         fft size, window and dc block apply when this radio streams iq. right now it hands
         over finished frames, which are shown as they arrive.
       </p>
@@ -705,3 +687,9 @@ onBeforeUnmount(() => {
     </p>
   </div>
 </template>
+
+<style scoped>
+.sp-help {
+  margin-top: 0;
+}
+</style>

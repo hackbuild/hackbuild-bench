@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, useId } from 'vue'
 import type { ParamSpec } from '@/core/types'
+import { formatRate } from '@/core/format'
 
 interface Props {
   spec: ParamSpec
@@ -30,14 +31,15 @@ function fromLogPos(pos: number): number {
   return logMin.value * Math.pow(logMax.value / logMin.value, pos / LOG_STEPS)
 }
 
-const isFrequency = computed(() => (props.spec.unit ?? '').toLowerCase() === 'hz')
+const unitKind = computed(() => (props.spec.unit ?? '').toLowerCase())
 
 function format(value: number): string {
   if (!Number.isFinite(value)) return '--'
   const named = props.spec.choiceLabels?.[props.spec.choices?.indexOf(value) ?? -1]
   if (named !== undefined) return named
   if (props.spec.topLabel && value >= props.spec.max) return props.spec.topLabel
-  if (isFrequency.value) return `${(value / 1e6).toFixed(3)} MHz`
+  if (unitKind.value === 'hz') return `${(value / 1e6).toFixed(3)} MHz`
+  if (unitKind.value === 'sps') return formatRate(value)
   const step = props.spec.step ?? 1
   const places = step >= 1 ? 0 : step >= 0.1 ? 1 : 2
   const unit = props.spec.unit ? ` ${props.spec.unit}` : ''

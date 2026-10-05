@@ -3,6 +3,8 @@
  * device sample rate, output is mono audio at the audio context rate.
  */
 
+import { lowPassTaps } from './channel'
+
 export type DemodMode = 'fm' | 'nfm' | 'am' | 'usb' | 'lsb' | 'raw'
 
 /**
@@ -134,28 +136,53 @@ export class AmDemod {
 }
 
 /**
- * Single sideband by frequency shifting the wanted sideband to baseband and
- * taking the real part. Good enough for listening, not for measurement.
+ * Single sideband. The channel arrives centred on the middle of the wanted
+ * sideband, so a low pass at half the bandwidth keeps that sideband and
+ * rejects the other, which sits a whole bandwidth away. Shifting by half the
+ * bandwidth then puts the carrier back at zero, and the real part is the
+ * audio at its own pitch.
  */
 export class SsbDemod {
   private phase = 0
-  private readonly upper: boolean
+  private step = 0
+  private taps: Float32Array = new Float32Array(1)
+  // history written twice so a window is always contiguous.
+  private histI = new Float32Array(2)
+  private histQ = new Float32Array(2)
+  private pos = 0
 
-  constructor(upper: boolean) {
-    this.upper = upper
+  /** `side` is 1 for the upper sideband and -1 for the lower. */
+  configure(side: 1 | -1, bandwidthHz: number, sampleRate: number): void {
+    this.step = (side * 2 * Math.PI * (bandwidthHz / 2)) / sampleRate
+    // the other sideband starts right at the cutoff, so the skirt is kept steep.
+    const transition = Math.max(150, bandwidthHz * 0.08)
+    const count = Math.max(31, Math.min(511, Math.ceil((5.5 * sampleRate) / transition) | 1))
+    this.taps = lowPassTaps(bandwidthHz / 2, sampleRate, count)
+    if (this.histI.length !== count * 2) {
+      this.histI = new Float32Array(count * 2)
+      this.histQ = new Float32Array(count * 2)
+      this.pos = 0
+    }
   }
 
-  process(iq: Float32Array, sampleRate: number, bandwidthHz = 2700): Float32Array {
+  process(iq: Float32Array): Float32Array {
     const out = new Float32Array(iq.length / 2)
-    const shift = (this.upper ? 1 : -1) * (bandwidthHz / 2)
-    const step = (2 * Math.PI * shift) / sampleRate
+    const t = this.taps
+    const n = t.length
     for (let i = 0, o = 0; i < iq.length; i += 2, o++) {
-      const c = Math.cos(this.phase)
-      const s = Math.sin(this.phase)
-      out[o] = iq[i] * c - iq[i + 1] * s
-      this.phase += step
+      this.histI[this.pos] = this.histI[this.pos + n] = iq[i]
+      this.histQ[this.pos] = this.histQ[this.pos + n] = iq[i + 1]
+      this.pos = this.pos + 1 === n ? 0 : this.pos + 1
+      let fi = 0
+      let fq = 0
+      for (let k = 0, h = this.pos; k < n; k++, h++) {
+        fi += t[k] * this.histI[h]
+        fq += t[k] * this.histQ[h]
+      }
+      out[o] = fi * Math.cos(this.phase) - fq * Math.sin(this.phase)
+      this.phase += this.step
       if (this.phase > Math.PI) this.phase -= 2 * Math.PI
-      if (this.phase < -Math.PI) this.phase += 2 * Math.PI
+      else if (this.phase < -Math.PI) this.phase += 2 * Math.PI
     }
     return out
   }
@@ -264,6 +291,14 @@ export const MODE_BANDWIDTH: Record<DemodMode, number> = {
   raw: 200000,
 }
 
+/**
+ * Which side of the listening point a mode hears: 1 above it, -1 below it,
+ * 0 both sides. The passband a panel draws follows this.
+ */
+export function sideOf(mode: DemodMode): 1 | -1 | 0 {
+  return mode === 'usb' ? 1 : mode === 'lsb' ? -1 : 0
+}
+
 function clampRange(v: number, lo: number, hi: number): number {
   return Math.max(lo, Math.min(hi, v))
 }
@@ -276,8 +311,7 @@ export class ReceiveChain {
   private down = new Downconverter()
   private fm = new FmDemod()
   private am = new AmDemod()
-  private usb = new SsbDemod(true)
-  private lsb = new SsbDemod(false)
+  private ssb = new SsbDemod()
   private lp: LowPass
   private deemph: LowPass
   private resamp = new Resampler()
@@ -329,11 +363,11 @@ export class ReceiveChain {
   }
 
   /**
-   * Decimation is the only channel filter here, and a boxcar rejects poorly:
-   * content just outside the slice folds back in a few dB down. ssb keeps twice
-   * its bandwidth, since it shifts the band by half its width before taking the
-   * real part and a slice one bandwidth wide would fold onto itself.
-   * Everything downstream runs at the decimated rate.
+   * Decimation is the channel filter for fm and am, and a boxcar rejects
+   * poorly: content just outside the slice folds back in a few dB down. ssb
+   * is centred on its sideband and kept at four times its width, so the
+   * sideband filter has room for a steep skirt. Everything downstream runs
+   * at the decimated rate.
    */
   private apply(): void {
     if (!this.inputRate) return
@@ -341,11 +375,12 @@ export class ReceiveChain {
     const limit = this.maxOffsetHz()
     this.offset = clampRange(this.offset, -limit, limit)
 
-    const ssb = this.mode === 'usb' || this.mode === 'lsb'
-    const ifTarget = ssb ? this.bandwidth * 2 : this.bandwidth
+    const side = sideOf(this.mode)
+    const ifTarget = side ? this.bandwidth * 4 : this.bandwidth
     const factor = Math.max(1, Math.round(this.inputRate / ifTarget))
     this.ifRate = this.inputRate / factor
-    this.down.configure(factor, this.offset, this.inputRate)
+    this.down.configure(factor, this.offset + (side * this.bandwidth) / 2, this.inputRate)
+    if (side) this.ssb.configure(side, this.bandwidth, this.ifRate)
     // deviation only sets the discriminator gain, and the agc follows it.
     const deviation = this.mode === 'fm' ? 75000 : Math.max(1000, this.bandwidth * 0.4)
     this.fm.configure(deviation, this.ifRate)
@@ -368,10 +403,8 @@ export class ReceiveChain {
         audio = this.am.process(base)
         break
       case 'usb':
-        audio = this.usb.process(base, this.ifRate, this.bandwidth)
-        break
       case 'lsb':
-        audio = this.lsb.process(base, this.ifRate, this.bandwidth)
+        audio = this.ssb.process(base)
         break
       default:
         return new Float32Array(0)

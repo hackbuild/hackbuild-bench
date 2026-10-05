@@ -36,11 +36,13 @@ yet:
 
 ## where it stands, 2026-10-05
 
-Everything is pushed and live. The last three code changes:
+Everything is pushed and live. The recent code changes:
 
 - `dcf8e56` eight decoder tabs, the iq player and recorder, and their audit
 - `26b60ae` the tv tab, which finds ATSC stations by pilot
 - `23aa5e8` the tv tab's analog picture view
+- the spectrum stage, tuning by drag and keys, full colour maps, and the
+  ssb fix, in the commit after the handoff update
 
 Nothing is uncommitted except `.claude/`, which stays out. The next likely
 asks are a live analog tv test when the Mesa ham repeater is on (see tv
@@ -293,6 +295,43 @@ They embed librtlsdr code, see the license note below. To rebuild one:
   - sig and snr are measured in the listening band against the noise in a
     band of the same width
 
+### spectrum ui, 2026-10-05
+
+- **One stage.** `InstSpectrum.vue` stacks the trace, the axis, the band plan
+  and the waterfall on one void with a pink shadow, as SDR++ does. Its head
+  holds zoom, fit and the colour map. Both tabs use it. The class is
+  `.bn-spec`, because `.bn-stage` already names the bench's main area.
+- **One pointer.** `useTuningPointer.ts` is the pointer code for the trace
+  and the waterfall, which were separate copies before.
+  - Pressing inside the passband drags it from where it was held.
+  - An outer edge resizes it.
+  - Anywhere else jumps there.
+  - Alt skips snapping, and the cursor shows the zone.
+  - The wheel accumulates trackpad deltas into notches. A sideways scroll,
+    which is what macos makes of shift and the wheel, pans.
+- **Passband shape.** The marker takes a `band` of [low, high] around the
+  listening point, so usb and lsb draw one sided. `sideOf()` in `demod.ts`
+  gives the side.
+- **Precision.**
+  - The dial shows hertz.
+  - The flag on the line reads frequency and width.
+  - On the trace's handle, the arrows step, shift with them steps a tenth,
+    page up and down step ten, the square brackets narrow and widen, and
+    home recentres.
+  - The tune tab has a snap toggle and a width menu per mode.
+- **Colour.** The maps are in `src/core/palettes.ts` as 256 entry lookups,
+  and kerf is the house map: void, indigo, violet, pink, amber, paper. The
+  trace fills under itself in the same map. The choice is a bench pref,
+  kept with the mode.
+- **SSB was broken until this change.** It kept both sidebands and played a
+  tone bw/2 high. `SsbDemod` now centres on the sideband, filters with a
+  windowed sinc at half the bandwidth, and shifts back. A 1 kHz tone comes
+  out at 1000 Hz, and the opposite sideband reads zero.
+- **Left as is.**
+  - `HbDial` digits still take no keyboard. That gap is in the ui library.
+  - The knobs keep the design system's pink sliders and values, as its kerf
+    reference does.
+
 ## audit, 2026-10-03
 
 Before this deploy, three reviews ran in parallel over the uncommitted work:
@@ -309,8 +348,8 @@ Left as they are:
   other in the band strip
 - during a stepped sweep the waterfall adds a row per step, not per pass
 - `HbDial` digits are clickable spans with no focus or role. That gap is in
-  the ui library, and the step buttons and the go to field cover the same
-  actions.
+  the ui library. The step buttons, the go to field and the trace's keys
+  cover the same actions.
 - the playbooks' `narrowRate` now picks 1.024 Msps for an rtl-sdr, where it
   picked 2.048 before, because the rate list grew. No playbook needs more
   than about 500 kHz either side.

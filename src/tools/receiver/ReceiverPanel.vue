@@ -1,12 +1,10 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, ref, useId, watch } from 'vue'
 import { HbButton, HbDial, HbIcon, HbInput, HbSelect } from '@virgilvox/hackbuild-ui'
-import InstScope from '@/components/instruments/InstScope.vue'
-import InstWaterfall from '@/components/instruments/InstWaterfall.vue'
+import InstSpectrum from '@/components/instruments/InstSpectrum.vue'
 import InstSmeter from '@/components/instruments/InstSmeter.vue'
 import InstKnob from '@/components/instruments/InstKnob.vue'
-import InstFreqAxis from '@/components/instruments/InstFreqAxis.vue'
-import InstBandStrip from '@/components/instruments/InstBandStrip.vue'
+import type { Band } from '@/components/instruments/useTuningPointer'
 import EarsPanel from './EarsPanel.vue'
 import { useDevices } from '@/stores/devices'
 import { useBench } from '@/stores/bench'
@@ -15,7 +13,7 @@ import { useReceiver } from '@/composables/useReceiver'
 import { useSpectrumView } from '@/composables/useSpectrumView'
 import { useRds } from '@/composables/useRds'
 import { isSimKind } from '@/core/drivers/sim/simulate'
-import { formatHz, formatRate } from '@/core/format'
+import { formatHz, formatRate, formatSpan } from '@/core/format'
 import { BAND_PLAN } from '@/core/bandplan'
 import {
   ENBW,
@@ -30,6 +28,7 @@ import {
 } from '@/core/dsp/spectrumMath'
 import type { DeviceToolProps } from '@/tools/types'
 import type { ParamSpec } from '@/core/types'
+import { sideOf } from '@/core/dsp/demod'
 import type { DemodMode } from '@/core/dsp/demod'
 
 const props = defineProps<DeviceToolProps>()
@@ -72,7 +71,13 @@ const highHz = computed(() => windowCenter.value + span.value / 2)
 
 /** Where the marker sits across the window, 0 at the low edge and 1 at the high. */
 const marker = computed(() => (span.value ? 0.5 + rx.offsetHz.value / span.value : 0.5))
-const markerWidth = computed(() => (span.value ? rx.bandwidthHz.value / span.value : 0))
+
+/** The passband as drawn: both sides for am and fm, one side for ssb. */
+const band = computed<Band>(() => {
+  const w = span.value ? rx.bandwidthHz.value / span.value : 0
+  const side = sideOf(rx.mode.value)
+  return side > 0 ? [0, w] : side < 0 ? [-w, 0] : [-w / 2, w / 2]
+})
 
 /** The frequency actually being demodulated, offset included. */
 const listeningHz = computed(() => centerHz.value + rx.offsetHz.value)
@@ -120,6 +125,39 @@ const MODE_STEP: Record<DemodMode, number> = {
 }
 
 const step = ref<number>(MODE_STEP[rx.mode.value])
+/** A click or a drag lands on the step grid. Alt held skips it once. */
+const snap = ref(true)
+
+/** A tenth of the step, never under 10 Hz, for the fine keys and alt with the wheel. */
+const fineStep = computed(() => Math.max(10, step.value / 10))
+
+/** Passband widths each mode is commonly listened through. */
+const WIDTHS: Record<DemodMode, number[]> = {
+  fm: [120000, 150000, 180000, 200000, 250000],
+  nfm: [6250, 8330, 12500, 16000, 25000],
+  am: [5000, 8000, 10000, 15000],
+  usb: [1800, 2400, 2700, 3000, 4000],
+  lsb: [1800, 2400, 2700, 3000, 4000],
+  raw: [],
+}
+
+const widthOptions = computed(() => {
+  const list = [...WIDTHS[rx.mode.value]]
+  const now = Math.round(rx.bandwidthHz.value)
+  if (now && !list.some((w) => Math.abs(w - now) < 1)) list.push(now)
+  return list.sort((a, b) => a - b).map((w) => ({ label: formatSpan(w), value: w }))
+})
+
+const widthModel = computed({
+  get: () => Math.round(rx.bandwidthHz.value),
+  set: (hz: number) => rx.setBandwidth(hz),
+})
+
+/** A dragged edge lands on a round width, finer for narrow modes. */
+function roundWidth(hz: number): number {
+  const q = hz < 1000 ? 50 : hz < 10000 ? 100 : hz < 100000 ? 500 : 5000
+  return Math.max(q, Math.round(hz / q) * q)
+}
 
 const centerSpec = computed(() => node.value?.descriptor.params.find((p) => p.key === 'centerHz'))
 
@@ -147,26 +185,34 @@ function goTo(hz: number, edge = 0.45): void {
  * A click lands inside the window, so it never retunes. Snapping can push a
  * click by the window edge past it, and that one is taken unsnapped.
  */
-function tuneTo(fraction: number): void {
+function tuneTo(fraction: number, snapIt = true): void {
   if (!span.value) return
   const hz = lowHz.value + fraction * span.value
-  const snapped = snapTo(hz, step.value)
+  const snapped = snap.value && snapIt ? snapTo(hz, step.value) : Math.round(hz)
   const target = Math.abs(snapped - centerHz.value) <= span.value / 2 ? snapped : hz
   rx.setOffset(clampHz(target) - centerHz.value)
 }
 
 function widthTo(fraction: number): void {
   if (!span.value) return
-  rx.setBandwidth(fraction * span.value)
+  rx.setBandwidth(roundWidth(fraction * span.value))
 }
 
-/** The next channel on the step grid in that direction, never one past it. */
-function stepBy(dir: number): void {
+/**
+ * Steps along the grid, never one past the next channel. A fine step moves
+ * by a tenth of the step from wherever the listening point is.
+ */
+function stepBy(steps: number, fine = false): void {
   const here = listeningHz.value
+  if (fine) {
+    goTo(here + steps * fineStep.value)
+    return
+  }
+  const dir = Math.sign(steps)
   const near = snapTo(here, step.value)
   const onGrid = Math.abs(near - here) < 1
-  const next = onGrid || (dir > 0 ? near < here : near > here) ? near + dir * step.value : near
-  goTo(next)
+  const first = onGrid || (dir > 0 ? near < here : near > here) ? near + dir * step.value : near
+  goTo(first + (steps - dir) * step.value)
 }
 
 /** The dial reads and writes MHz. */
@@ -174,9 +220,9 @@ const dialMhz = computed({
   get: () => listeningHz.value / 1e6,
   set: (mhz: number) => goTo(mhz * 1e6),
 })
-// counted on the value as the dial rounds it, so 99.99996 shows as 100.0000.
+// counted on the value as the dial rounds it, so 99.9999996 shows as 100.000000.
 const dialDigits = computed(() => {
-  const shown = Math.round(dialMhz.value * 1e4) / 1e4
+  const shown = Math.round(dialMhz.value * 1e6) / 1e6
   return Math.max(1, Math.floor(Math.log10(Math.max(1, shown))) + 1)
 })
 
@@ -184,6 +230,7 @@ const uid = useId()
 const gotoId = `${uid}-goto`
 const hintId = `${uid}-hint`
 const stepId = `${uid}-step`
+const widthId = `${uid}-width`
 
 const typed = ref('')
 const typedBad = ref(false)
@@ -203,6 +250,9 @@ function submitTyped(): void {
 function recentre(): void {
   rx.setOffset(0)
 }
+
+/** The flag over the listening line: where, and how wide. */
+const markerLabel = computed(() => `${formatHz(listeningHz.value, 6)}  ${formatSpan(rx.bandwidthHz.value)}`)
 
 // the placeholder trace is invented, so real hardware never draws it.
 const placeholder = computed(() => !streaming.value && sim.value)
@@ -327,8 +377,6 @@ const channel = computed(() => {
   return { db, snr: db - noise, noise }
 })
 
-const zoomed = computed(() => view.view.value[1] - view.view.value[0] < 0.999)
-
 async function listen(): Promise<void> {
   await rx.start()
   // the sink is built by start(), so the knob's position is applied after it.
@@ -358,32 +406,24 @@ onBeforeUnmount(() => {
   <div>
     <div class="bn-meta">
       <div>
-        <div class="bn-k">tuned</div>
+        <div class="bn-k">radio at</div>
         <div class="bn-v">{{ formatHz(centerHz) }}</div>
       </div>
       <div>
         <div class="bn-k">rate</div>
         <div class="bn-v">{{ formatRate(sampleRate) }}</div>
       </div>
-      <div>
-        <div class="bn-k">mode</div>
-        <div class="bn-v">{{ rx.mode.value }}</div>
-      </div>
       <div v-for="p in gains" :key="p.key">
         <div class="bn-k">{{ p.label }}</div>
-        <div class="bn-v is-goo">{{ readout(p) }}</div>
+        <div class="bn-v">{{ readout(p) }}</div>
       </div>
       <div v-if="channel">
-        <div class="bn-k">sig</div>
+        <div class="bn-k">signal</div>
         <div class="bn-v">{{ channel.db.toFixed(0) }} dB</div>
       </div>
       <div v-if="channel">
         <div class="bn-k">snr</div>
         <div class="bn-v">{{ Math.max(0, channel.snr).toFixed(0) }} dB</div>
-      </div>
-      <div v-if="span">
-        <div class="bn-k">width</div>
-        <div class="bn-v">{{ formatHz(rx.bandwidthHz.value, 1) }}</div>
       </div>
       <div v-if="node?.info.tuner">
         <div class="bn-k">tuner</div>
@@ -409,7 +449,7 @@ onBeforeUnmount(() => {
       </button>
     </div>
 
-    <p v-if="!bench.advanced && unreachable.length && centerSpec" class="bn-note" style="margin-top: 0">
+    <p v-if="!bench.advanced && unreachable.length && centerSpec" class="bn-note rx-tight">
       outside what this radio tunes: {{ unreachable.join(', ') }}. it covers
       {{ formatHz(centerSpec.min) }} to {{ formatHz(centerSpec.max) }}.
     </p>
@@ -430,22 +470,18 @@ onBeforeUnmount(() => {
     </div>
 
     <div class="bn-dial">
-      <div role="group" :aria-label="`listening at ${formatHz(listeningHz, 4)}`">
+      <div role="group" :aria-label="`listening at ${formatHz(listeningHz, 6)}`">
         <HbDial
           v-model="dialMhz"
           :digits="dialDigits"
-          :decimals="4"
+          :decimals="6"
           unit="MHz"
           :min="(centerSpec?.min ?? 0) / 1e6"
           :max="(centerSpec?.max ?? 1e12) / 1e6"
         />
       </div>
-      <button class="bn-rbtn" type="button" :aria-label="`down one step`" @click="stepBy(-1)">&#9668;</button>
-      <button class="bn-rbtn" type="button" :aria-label="`up one step`" @click="stepBy(1)">&#9658;</button>
-      <HbButton size="sm" :loading="rolling" :disabled="!pool.length" @click="roll">
-        <template #icon><HbIcon name="dice" /></template>
-        surprise me
-      </HbButton>
+      <button class="bn-rbtn" type="button" :aria-label="`down one step, ${formatSpan(step)}`" @click="stepBy(-1)">&#9668;</button>
+      <button class="bn-rbtn" type="button" :aria-label="`up one step, ${formatSpan(step)}`" @click="stepBy(1)">&#9658;</button>
       <HbButton v-if="!streaming" variant="danger" size="sm" @click="listen">
         <template #icon><HbIcon name="play" /></template>
         listen
@@ -454,32 +490,52 @@ onBeforeUnmount(() => {
         <template #icon><HbIcon name="stop" /></template>
         stop
       </HbButton>
+      <HbButton size="sm" variant="secondary" :loading="rolling" :disabled="!pool.length" @click="roll">
+        <template #icon><HbIcon name="dice" /></template>
+        surprise me
+      </HbButton>
     </div>
 
-    <form class="bn-goto" @submit.prevent="submitTyped">
-      <label class="bn-klabel" :for="gotoId">go to</label>
-      <HbInput
-        :id="gotoId"
-        v-model="typed"
-        :invalid="typedBad"
-        placeholder="146.52"
-        inputmode="decimal"
-        autocomplete="off"
-        :aria-describedby="hintId"
-      />
-      <HbButton size="sm" type="submit">go</HbButton>
-      <label class="bn-klabel" :for="stepId">step</label>
-      <HbSelect :id="stepId" v-model="step" :options="STEPS" />
-    </form>
-    <p :id="hintId" class="bn-note" style="margin: 4px 0 0">
-      <template v-if="typedBad">that is not a frequency. try 146.52, 1090k or 7.2 mhz.</template>
-      <template v-else>
-        a bare number is mhz. the wheel over the trace moves one step, ctrl and the wheel
-        zooms, shift and the wheel pans.
-      </template>
+    <InstSmeter
+      :db="channel?.db ?? -120"
+      :floor-db="channel?.noise ?? -90"
+      :ceil-db="(channel?.noise ?? -90) + 50"
+    />
+
+    <div class="rx-row">
+      <form class="bn-goto" @submit.prevent="submitTyped">
+        <label class="bn-klabel" :for="gotoId">go to</label>
+        <HbInput
+          :id="gotoId"
+          v-model="typed"
+          :invalid="typedBad"
+          placeholder="146.52"
+          inputmode="decimal"
+          autocomplete="off"
+          :aria-describedby="hintId"
+        />
+        <HbButton size="sm" type="submit">go</HbButton>
+      </form>
+      <div class="bn-goto">
+        <label class="bn-klabel" :for="stepId">step</label>
+        <HbSelect :id="stepId" v-model="step" :options="STEPS" />
+        <button
+          type="button"
+          class="bn-pack"
+          :class="{ 'is-on': snap }"
+          :aria-pressed="snap"
+          title="clicks and drags land on the step grid"
+          @click="snap = !snap"
+        >
+          snap
+        </button>
+      </div>
+    </div>
+    <p v-if="typedBad" :id="hintId" class="bn-note rx-tight" role="alert">
+      that is not a frequency. try 146.52, 1090k or 7.2 mhz. a bare number is mhz.
     </p>
 
-    <p v-if="!pool.length" class="bn-note" style="margin-top: 0">
+    <p v-if="!pool.length" class="bn-note rx-tight">
       surprise me is off: nothing on its list is inside what this radio tunes.
     </p>
 
@@ -495,7 +551,7 @@ onBeforeUnmount(() => {
       </HbButton>
     </div>
 
-    <div class="bn-knobs">
+    <div class="bn-knobs rx-demod">
       <div class="bn-knob">
         <span class="bn-klabel">demod</span>
         <div class="bn-seg2" role="group" aria-label="demodulator">
@@ -511,39 +567,19 @@ onBeforeUnmount(() => {
           </button>
         </div>
       </div>
-
+      <div v-if="widthOptions.length" class="bn-knob">
+        <label class="bn-klabel" :for="widthId">width</label>
+        <HbSelect :id="widthId" v-model="widthModel" :options="widthOptions" />
+      </div>
       <InstKnob v-model="volume" :spec="VOLUME" />
-      <InstKnob v-for="p in knobs" :key="p.key" v-model="paramModel(p.key).value" :spec="p" />
     </div>
 
-    <InstSmeter
-      :db="channel?.db ?? -120"
-      :floor-db="channel?.noise ?? -90"
-      :ceil-db="(channel?.noise ?? -90) + 50"
-    />
+    <p v-if="!streaming && !sim" class="bn-note rx-tight">idle. nothing is being sampled until you press listen.</p>
 
-    <p v-if="!streaming && !sim" class="bn-note" style="margin-top: 0">
-      idle. nothing is being sampled until you press listen.
-    </p>
-
-    <p v-if="span" class="bn-note" style="margin-bottom: 4px">
-      click the trace or the waterfall to move where you are listening, drag the edges of
-      the lit band to widen or narrow it. the radio stays where it is tuned until you step
-      past the edge of the window.
-      <button v-if="rx.offsetHz.value" type="button" class="bn-linkish" @click="recentre">
-        back to centre
-      </button>
-      <button v-if="zoomed" type="button" class="bn-linkish" @click="view.fit()">
-        zoom out
-      </button>
-    </p>
-
-    <InstScope
+    <InstSpectrum
+      v-model:palette="bench.palette"
+      title="tune"
       :bins="view.bins.value"
-      :height="170"
-      ruled
-      db-axis
-      :auto="false"
       :min-db="view.minDb.value"
       :max-db="view.maxDb.value"
       :demo="placeholder"
@@ -551,41 +587,30 @@ onBeforeUnmount(() => {
       :low-hz="lowHz"
       :high-hz="highHz"
       :marker="span ? marker : null"
-      :marker-width="markerWidth"
+      :band="band"
+      :marker-label="span ? markerLabel : ''"
       :interactive="!!span"
+      :bands="BAND_PLAN"
+      :trace-height="180"
+      :fall-height="130"
       @tune="tuneTo"
       @width="widthTo"
       @step="stepBy"
       @zoom="view.zoom"
       @pan="view.pan"
+      @fit="view.fit"
     />
-    <InstFreqAxis
-      v-if="span"
-      :low-hz="lowHz"
-      :high-hz="highHz"
-      :view="view.view.value"
-      :marks="[marker]"
-      @pan="view.pan"
-      @zoom="view.zoom"
-    />
-    <InstBandStrip v-if="span" :low-hz="lowHz" :high-hz="highHz" :view="view.view.value" :bands="BAND_PLAN" />
-    <InstWaterfall
-      :bins="view.bins.value"
-      :height="120"
-      :auto="false"
-      :min-db="view.minDb.value"
-      :max-db="view.maxDb.value"
-      :demo="placeholder"
-      :view="view.view.value"
-      :marker="span ? marker : null"
-      :marker-width="markerWidth"
-      :interactive="!!span"
-      @tune="tuneTo"
-      @step="stepBy"
-      @zoom="view.zoom"
-      @pan="view.pan"
-      style="margin-top: 8px"
-    />
+
+    <p v-if="span" class="bn-note rx-help">
+      click to listen there, drag the lit band to move it, drag its edge to resize it. alt turns
+      snapping off. on the trace, the arrows step, shift with them steps by a tenth, and the
+      square brackets narrow and widen. the radio retunes once you step past the window.
+      <button v-if="rx.offsetHz.value" type="button" class="bn-linkish" @click="recentre">back to centre</button>
+    </p>
+
+    <div v-if="knobs.length" class="bn-knobs">
+      <InstKnob v-for="p in knobs" :key="p.key" v-model="paramModel(p.key).value" :spec="p" />
+    </div>
 
     <EarsPanel :device-id="deviceId" />
 
@@ -595,3 +620,22 @@ onBeforeUnmount(() => {
     </p>
   </div>
 </template>
+
+<style scoped>
+.rx-tight {
+  margin-top: 0;
+}
+.rx-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--hb-s2) var(--hb-s5);
+  align-items: center;
+  margin: var(--hb-s2) 0;
+}
+.rx-demod {
+  margin-bottom: 0;
+}
+.rx-help {
+  margin-top: 0;
+}
+</style>

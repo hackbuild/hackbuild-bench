@@ -5,6 +5,7 @@
 
 export { default as InstScope } from './InstScope.vue'
 export { default as InstWaterfall } from './InstWaterfall.vue'
+export { default as InstSpectrum } from './InstSpectrum.vue'
 export { default as InstSmeter } from './InstSmeter.vue'
 export { default as InstWordCloud } from './InstWordCloud.vue'
 export { default as InstEvpFeed } from './InstEvpFeed.vue'
