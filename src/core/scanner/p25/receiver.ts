@@ -17,6 +17,7 @@
  */
 
 import { ChannelFilter } from '@/core/dsp/channel'
+import { Fft } from '@/core/dsp/fft'
 import {
   DUID,
   MAX_TSBKS,
@@ -39,6 +40,22 @@ const QUARTER_PI = Math.PI / 4
 const SYNC_TOLERANCE = 3
 const INVERTED_SYNC = SYNC.map((d) => d ^ 2)
 
+/**
+ * How far from its listed frequency the channel is looked for. A stick with
+ * no ppm correction is often 10 ppm out, which is 8 kHz at 800 MHz, well
+ * past the channel filter's edge.
+ */
+const SEARCH_HZ = 15_000
+const ACQ_HALF_HZ = 21_000
+const ACQ_SIZE = 4096
+const ACQ_FRAMES = 6
+/** The width a P25 signal's power mostly sits in, for finding its middle. */
+const SIGNAL_WIDTH_HZ = 8_000
+/** A lump this far over the floor counts as a signal. */
+const ACQ_MIN_DB = 4
+/** Symbols without a new frame sync before the channel is looked for again. */
+const REACQUIRE_SYMBOLS = SYMBOL_RATE * 4
+
 export interface P25Stats {
   /** Symbols the slicer has produced. */
   symbols: number
@@ -56,6 +73,10 @@ export interface P25Stats {
   offsetHz: number
   /** The last sync matched upside down, as a spectrum inverted by the radio would. */
   inverted: boolean
+  /** Looking for the channel, or reading it. */
+  stage: 'acquire' | 'decode'
+  /** The channel's power over the floor beside it when last looked for, in dB. */
+  signalDb: number
 }
 
 /** Reads frames out of a stream of dibits. */
@@ -196,6 +217,19 @@ export class ControlChannelDecoder {
   private offset = 0
   private sps = 10
 
+  // acquisition: a wider look around the listed frequency to find the channel.
+  private wide: ChannelFilter | null = null
+  private readonly fft = new Fft(ACQ_SIZE)
+  private readonly acqRe = new Float32Array(ACQ_SIZE)
+  private readonly acqIm = new Float32Array(ACQ_SIZE)
+  private readonly acqPow = new Float64Array(ACQ_SIZE)
+  private acqFill = 0
+  private acqFrames = 0
+  /** Where the channel was found, in Hz from the listed frequency. */
+  private found = 0
+  private syncsAtCheck = 0
+  private symbolsAtCheck = 0
+
   // the unwrapped phase of the channel, one entry per channel sample.
   private phase: number[] = []
   private acc = 0
@@ -217,6 +251,8 @@ export class ControlChannelDecoder {
     nac: null,
     offsetHz: 0,
     inverted: false,
+    stage: 'acquire',
+    signalDb: 0,
   }
   private readonly framer: Framer
 
@@ -232,28 +268,90 @@ export class ControlChannelDecoder {
   }
 
   getStats(): P25Stats {
-    return { ...this.stats, offsetHz: (this.bias * this.channelRate()) / (2 * Math.PI) }
+    const fineHz = this.stats.stage === 'decode' ? (this.bias * this.channelRate()) / (2 * Math.PI) : 0
+    return { ...this.stats, offsetHz: this.found + fineHz }
   }
 
   private channelRate(): number {
     return this.filter?.outRate ?? CHANNEL_RATE
   }
 
+  /** Starts looking for the channel around the listed frequency. */
   private rebuild(): void {
     if (!this.inputRate) return
-    this.filter = new ChannelFilter(this.offset, this.inputRate, CHANNEL_HALF_HZ, CHANNEL_RATE)
+    this.wide = new ChannelFilter(this.offset, this.inputRate, ACQ_HALF_HZ, CHANNEL_RATE)
+    this.filter = null
+    this.acqFill = 0
+    this.acqFrames = 0
+    this.acqPow.fill(0)
+    this.found = 0
+    this.stats.stage = 'acquire'
+  }
+
+  /** Decodes the channel where it was found. */
+  private lock(): void {
+    this.filter = new ChannelFilter(this.offset + this.found, this.inputRate, CHANNEL_HALF_HZ, CHANNEL_RATE)
     this.sps = this.filter.outRate / SYMBOL_RATE
     this.phase.length = 0
     this.acc = 0
     this.bias = 0
     this.t = 2 * this.sps
     this.framer.reset()
+    this.wide = null
+    this.stats.stage = 'decode'
+    this.syncsAtCheck = this.stats.syncs
+    this.symbolsAtCheck = this.stats.symbols
+  }
+
+  /** One wide sample in. When enough are in, finds the channel's middle. */
+  private acquire(i: number, q: number): void {
+    const w = 0.5 - 0.5 * Math.cos((2 * Math.PI * this.acqFill) / ACQ_SIZE)
+    this.acqRe[this.acqFill] = i * w
+    this.acqIm[this.acqFill] = q * w
+    if (++this.acqFill < ACQ_SIZE) return
+    this.acqFill = 0
+    this.fft.transform(this.acqRe, this.acqIm)
+    for (let k = 0; k < ACQ_SIZE; k++) this.acqPow[k] += this.acqRe[k] ** 2 + this.acqIm[k] ** 2
+    if (++this.acqFrames < ACQ_FRAMES) return
+
+    const rate = this.wide?.outRate ?? CHANNEL_RATE
+    const binHz = rate / ACQ_SIZE
+    const at = (hz: number) => this.acqPow[((Math.round(hz / binHz) % ACQ_SIZE) + ACQ_SIZE) % ACQ_SIZE]
+    const half = Math.round(SIGNAL_WIDTH_HZ / 2 / binHz)
+    const all: number[] = []
+    for (let hz = -ACQ_HALF_HZ; hz <= ACQ_HALF_HZ; hz += binHz) all.push(at(hz))
+    all.sort((a, b) => a - b)
+    const floor = all[Math.floor(all.length / 4)] || 1e-30
+    let best = -1
+    let bestHz = 0
+    for (let hz = -SEARCH_HZ; hz <= SEARCH_HZ; hz += binHz) {
+      let sum = 0
+      for (let k = -half; k <= half; k++) sum += at(hz + k * binHz)
+      if (sum > best) {
+        best = sum
+        bestHz = hz
+      }
+    }
+    this.stats.signalDb = 10 * Math.log10(best / (2 * half + 1) / floor)
+    this.acqFrames = 0
+    this.acqPow.fill(0)
+    if (this.stats.signalDb < ACQ_MIN_DB) return
+    this.found = Math.round(bestHz)
+    this.lock()
   }
 
   feed(iq: Float32Array, sampleRate: number): void {
     if (sampleRate !== this.inputRate) {
       this.inputRate = sampleRate
       this.rebuild()
+    }
+    const wide = this.wide
+    if (wide) {
+      for (let n = 0; n + 1 < iq.length; n += 2) {
+        if (wide.push(iq[n], iq[n + 1])) this.acquire(wide.outI, wide.outQ)
+        if (!this.wide) break
+      }
+      return
     }
     const f = this.filter
     if (!f) return
@@ -308,6 +406,15 @@ export class ControlChannelDecoder {
       this.framer.push(dibit)
 
       this.t += sps + 0.08 * err * sps
+    }
+    // no frame for a while means the lock was on the wrong thing, or the channel moved.
+    if (this.stats.symbols - this.symbolsAtCheck > REACQUIRE_SYMBOLS) {
+      if (this.stats.syncs === this.syncsAtCheck) {
+        this.rebuild()
+        return
+      }
+      this.syncsAtCheck = this.stats.syncs
+      this.symbolsAtCheck = this.stats.symbols
     }
     // keep a few symbols of history behind the clock.
     const keep = Math.floor(this.t - 3 * sps)

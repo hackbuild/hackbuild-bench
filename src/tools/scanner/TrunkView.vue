@@ -201,10 +201,21 @@ const verdict = computed(() => {
   if (!running.value || isDemo.value || !s) return ''
   if (s.good > 0) return `decoding. ${s.good} control blocks read.`
   if (s.syncs > 0) return 'p25 frames heard, but no block has passed its check yet. the signal is weak or smeared.'
+  if (s.stage === 'acquire') {
+    return `looking for a signal within 15 khz of ${formatHz(controlHz.value, 5)}. the strongest lump stands ${Math.max(0, s.signalDb).toFixed(0)} db over the floor.`
+  }
   if (triedSilent.value >= controlList.value.length && controlList.value.length > 1) {
     return 'no p25 on any listed control frequency. the antenna may not reach the site, or the list is out of date.'
   }
-  return `listening for p25 on ${formatHz(controlHz.value, 5)}.`
+  return `found a signal ${Math.round(s.offsetHz)} hz from ${formatHz(controlHz.value, 5)}, listening for p25 frames.`
+})
+
+/** A carrier this far off is the radio's crystal, which the tv tab can measure and correct. */
+const ppmHint = computed(() => {
+  const s = lock.value
+  if (!s || s.stage !== 'decode' || Math.abs(s.offsetHz) < 2500 || !controlHz.value) return ''
+  const ppm = (s.offsetHz / controlHz.value) * 1e6
+  return `the carrier sits ${Math.abs(ppm).toFixed(1)} ppm off, which is this radio's crystal. the crystal check on the tv tab measures and sets the correction.`
 })
 
 const SERVICES = ['all', 'fire', 'law', 'ems', 'interop']
@@ -290,6 +301,7 @@ onBeforeUnmount(() => {
     <div class="tr-live" role="status">
       <p v-if="verdict" class="bn-note">{{ verdict }}</p>
     </div>
+    <p v-if="ppmHint" class="bn-note">{{ ppmHint }}</p>
 
     <div v-if="!isDemo && running" class="bn-reads tr-reads">
       <div class="bn-read">

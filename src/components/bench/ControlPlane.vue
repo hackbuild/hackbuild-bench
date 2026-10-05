@@ -107,7 +107,7 @@ async function disconnect(): Promise<void> {
           :key="t.id"
           type="button"
           class="bn-subtab"
-          :class="{ 'is-on': t.id === activeId, 'is-adv': t.advanced }"
+          :class="{ 'is-on': t.id === activeId }"
           :aria-pressed="t.id === activeId"
           @click="activeId = t.id"
         >

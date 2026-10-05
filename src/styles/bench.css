@@ -591,9 +591,6 @@ canvas {
   background: var(--hb-ink);
   color: var(--hb-paper);
 }
-.bn-subtab.is-adv {
-  border-bottom: 3px dashed var(--hb-pink);
-}
 .bn-subtab:disabled {
   opacity: 0.3;
   cursor: not-allowed;

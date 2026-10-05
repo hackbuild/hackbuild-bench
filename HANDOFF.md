@@ -45,7 +45,8 @@ Everything is pushed and live. The recent code changes:
   and the ssb fix
 - `ab83586` a tool that fails to load says so and offers a reload, since a
   page opened before a deploy asks for files that are gone
-- the scanner and trunking rework, after that
+- `a787aed` the scanner and trunking rework, then channel acquisition
+  after it
 
 Nothing is uncommitted except `.claude/`, which stays out. The next likely
 asks are a live analog tv test when the Mesa ham repeater is on (see tv
@@ -380,6 +381,16 @@ Both modes of the scanner tab were broken on hardware.
   `channelDb` inside the listening slice, and the scanner tunes 250 kHz off
   the channel. It ignores readings still arriving from the last frequency
   and opens at a level over a tracked noise floor, 10 dB by default.
+- **Acquisition.** The receiver first looks 15 kHz either side of the
+  listed frequency for the 8 kHz lump a P25 signal makes, then decodes
+  where it found it. Four seconds without a sync and it looks again.
+  - Why: the ppm a stick remembers is kept per site, so on the live site
+    the FC0012 runs uncorrected. That is 7.7 kHz at 853 MHz, past the
+    channel filter, and a live try there read -4.2 kHz and 0 syncs.
+  - Checked: 7.7 kHz and -12 kHz offsets lock within 80 Hz and decode,
+    and noise alone never locks.
+  - The tab turns an offset over 2.5 kHz into ppm and points to the tv
+    tab's crystal check.
 - **Not run on air yet.** The stick was held by the browser the whole
   time. The RWC control frequencies bundled match what RadioReference
   users list.
