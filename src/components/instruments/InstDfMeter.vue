@@ -2,15 +2,20 @@
 import { computed } from 'vue'
 
 interface Props {
-  /** Received level in dBm. */
+  /** Received level, in dBm unless `unit` says otherwise. */
   rssi: number
   floorDb?: number
   ceilDb?: number
+  unit?: string
+  /** The hot and cold word and the distance guess, which only a fox hunt wants. */
+  hunt?: boolean
 }
 
 const props = withDefaults(defineProps<Props>(), {
   floorDb: -90,
   ceilDb: -30,
+  unit: 'dBm',
+  hunt: true,
 })
 
 const percent = computed(() => {
@@ -31,16 +36,16 @@ const word = computed(() => {
 // as an order of magnitude rather than a measurement.
 const metres = computed(() => Math.max(1, Math.round((100 - percent.value) / 12)))
 
-const readout = computed(() => `${Math.round(props.rssi)} dBm`)
+const readout = computed(() => (Number.isFinite(props.rssi) ? `${Math.round(props.rssi)} ${props.unit}` : '--'))
 </script>
 
 <template>
   <div>
-    <div class="bn-huntword">{{ word }}</div>
+    <div v-if="hunt" class="bn-huntword">{{ word }}</div>
     <div
       class="bn-dfmeter"
       role="meter"
-      :aria-valuenow="Math.round(rssi)"
+      :aria-valuenow="Number.isFinite(rssi) ? Math.round(rssi) : undefined"
       :aria-valuemin="floorDb"
       :aria-valuemax="ceilDb"
       :aria-label="'signal strength, ' + readout"
@@ -48,6 +53,6 @@ const readout = computed(() => `${Math.round(props.rssi)} dBm`)
       <i :style="{ width: percent + '%' }"></i>
       <span>{{ readout }}</span>
     </div>
-    <p class="bn-note">roughly {{ metres }} m away, walk and watch the bar</p>
+    <p v-if="hunt" class="bn-note">roughly {{ metres }} m away, walk and watch the bar</p>
   </div>
 </template>

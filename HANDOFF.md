@@ -391,6 +391,40 @@ Left as they are:
 - the alerts retune path was not exercised, since a recording cannot retune
 - the HackRF's gains are not exposed in the new tabs
 
+## tv, 2026-10-05
+
+The tv tab (`src/tools/tv`, `src/core/decode/atsc`) finds ATSC stations
+rather than showing them. A US channel is 6 MHz wide and an rtl-sdr takes in
+under 3, so the picture cannot be decoded. Each ATSC 1.0 station carries a
+pilot 309.441 kHz over its lower edge, which stands some 30 dB over the
+data in a 146 Hz bin.
+
+- **Scan.** The radio sits 600 kHz above each channel's pilot at 2.4 Msps,
+  averages twelve 16k transforms, and reads the pilot's height over the
+  bins around it. It also reads the data band over the quiet channels of
+  the same pass, which is how ATSC 3.0, with no pilot, shows. A pass over
+  35 channels takes about 4.5 s.
+- **Aim** holds one channel and reads the pilot six times a second.
+- **Crystal check.** The median pilot error over the strong stations gives
+  the ppm. It is offered as a button when it is at least 1 ppm from the
+  setting.
+- **Bus.** A reading per station per pass goes on the bus. Demo mode sends
+  nothing.
+
+Live in Phoenix on the FC0012 at gain 20, indoors:
+
+- 20 stations had a pilot. KAET 8, KSAZ 10, KPNX 12, KNXV 15, KPHO 17 and
+  KTVK 24 match their published rf channels.
+- RF 27 showed as wideband with no pilot. That is KASW, which carries the
+  market's ATSC 3.0 multiplex.
+- 18 stations put the crystal 9.3 ppm low. After setting ppm to 9, the next
+  pass read 0.6 ppm off, and later passes drifted to about 1.4 as the stick
+  warmed. That confirms the sign. The earlier FM estimate was 11.
+- Aiming at RF 15 read 34.7 to 35.1 db over eight seconds.
+
+RF 11 also showed as wideband. It may be the Buckeye translator K04SE-D, or
+spill from a strong neighbour. That is unconfirmed.
+
 ## recordings
 
 - **Player:** the `iqfile` driver (`src/core/drivers/iqfile`) plays .cu8,
@@ -446,7 +480,7 @@ is open and belongs to the owner.
 - the stepped sweep was exercised in demo mode only
 - no offset tuning for the zero if tuners, so an E4000 or FC stick shows the
   demod's dc remainder at the centre. librtlsdr leaves it off by default too.
-- an rtl-sdr carries twelve tabs in easy mode and sixteen in
+- an rtl-sdr carries thirteen tabs in easy mode and seventeen in
   advanced, which wrap to several rows at 390 px. Grouping the decoders
   under one tab is open.
 - `.claude/worktrees/` holds the agent worktrees the decoders were built in.

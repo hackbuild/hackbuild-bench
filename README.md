@@ -60,6 +60,7 @@ Decoders run on any radio that streams iq, and on recordings:
 | alerts | NOAA Weather Radio SAME headers, with the audio | 162.400 to 162.550 MHz |
 | weather sat | Meteor-M LRPT images, and NOAA APT from archived recordings | 137.1 and 137.9 MHz |
 | tune | FM station name, PI and call sign, radiotext and clock over RDS | FM broadcast |
+| tv | which ATSC stations are on air, by pilot, with a meter for aiming an antenna and a crystal check. Not the picture: a channel is 6 MHz wide. | US tv channels 2 to 36 |
 
 The spectrum tab measures as well as draws. It has:
 

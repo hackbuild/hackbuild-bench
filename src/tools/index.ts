@@ -171,6 +171,15 @@ const TOOLS: ToolManifest[] = [
     order: 33.5,
   },
   {
+    id: 'tv',
+    label: 'tv',
+    icon: 'display',
+    scope: 'device',
+    requires: [CAPABILITIES.CAPTURE_IQ],
+    component: defineAsyncComponent(() => import('./tv/TvPanel.vue')),
+    order: 39.2,
+  },
+  {
     id: 'transmit',
     label: 'transmit',
     icon: 'tower-broadcast',
