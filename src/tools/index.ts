@@ -1,6 +1,6 @@
-import { defineAsyncComponent } from 'vue'
 import { CAPABILITIES } from '@/core/capabilities'
 import { registerTools } from './registry'
+import { lazyTool } from './lazy'
 import type { ToolManifest } from './types'
 
 import ReceiverPanel from './receiver/ReceiverPanel.vue'
@@ -110,7 +110,7 @@ const TOOLS: ToolManifest[] = [
     icon: 'bell',
     scope: 'device',
     requires: [CAPABILITIES.CAPTURE_IQ],
-    component: defineAsyncComponent(() => import('./pagers/PagersPanel.vue')),
+    component: lazyTool(() => import('./pagers/PagersPanel.vue')),
     advanced: true,
     order: 34.5,
   },
@@ -120,7 +120,7 @@ const TOOLS: ToolManifest[] = [
     icon: 'temperature-half',
     scope: 'device',
     requires: [CAPABILITIES.CAPTURE_IQ],
-    component: defineAsyncComponent(() => import('./sensors/SensorsPanel.vue')),
+    component: lazyTool(() => import('./sensors/SensorsPanel.vue')),
     order: 34.6,
   },
   {
@@ -129,7 +129,7 @@ const TOOLS: ToolManifest[] = [
     icon: 'plane',
     scope: 'device',
     requires: [CAPABILITIES.CAPTURE_IQ],
-    component: defineAsyncComponent(() => import('./sky/SkyPanel.vue')),
+    component: lazyTool(() => import('./sky/SkyPanel.vue')),
     order: 36,
   },
   {
@@ -138,7 +138,7 @@ const TOOLS: ToolManifest[] = [
     icon: 'envelope',
     scope: 'device',
     requires: [CAPABILITIES.CAPTURE_IQ],
-    component: defineAsyncComponent(() => import('./acars/AcarsPanel.vue')),
+    component: lazyTool(() => import('./acars/AcarsPanel.vue')),
     advanced: true,
     order: 37,
   },
@@ -148,7 +148,7 @@ const TOOLS: ToolManifest[] = [
     icon: 'water',
     scope: 'device',
     requires: [CAPABILITIES.CAPTURE_IQ],
-    component: defineAsyncComponent(() => import('./ais/AisPanel.vue')),
+    component: lazyTool(() => import('./ais/AisPanel.vue')),
     order: 38,
   },
   {
@@ -157,7 +157,7 @@ const TOOLS: ToolManifest[] = [
     icon: 'globe',
     scope: 'device',
     requires: [CAPABILITIES.CAPTURE_IQ],
-    component: defineAsyncComponent(() => import('./radiosonde/RadiosondePanel.vue')),
+    component: lazyTool(() => import('./radiosonde/RadiosondePanel.vue')),
     advanced: true,
     order: 39,
   },
@@ -167,7 +167,7 @@ const TOOLS: ToolManifest[] = [
     icon: 'warning',
     scope: 'device',
     requires: [CAPABILITIES.AUDIO_DEMOD],
-    component: defineAsyncComponent(() => import('./alerts/AlertsPanel.vue')),
+    component: lazyTool(() => import('./alerts/AlertsPanel.vue')),
     order: 33.5,
   },
   {
@@ -176,7 +176,7 @@ const TOOLS: ToolManifest[] = [
     icon: 'display',
     scope: 'device',
     requires: [CAPABILITIES.CAPTURE_IQ],
-    component: defineAsyncComponent(() => import('./tv/TvPanel.vue')),
+    component: lazyTool(() => import('./tv/TvPanel.vue')),
     order: 39.2,
   },
   {
