@@ -521,6 +521,28 @@ dispatch codes.
   transcript (see the earlier section) against the Phoenix PD list and
   tags each call by category.
 
+### trunked directory, keys ui, transcript log, 2026-10-05
+
+- **State directory.** `STATEWIDE_DIRECTORY` in `core/scanner/systems.ts`
+  lists the 37 statewide P25 systems from the Project 25 Technology
+  Interest Group's public list (project25.org, rev 4-18-18), plus Florida
+  SLERS and Texas WARN, by name and state only. Control frequencies change
+  and are not bundled, so each entry is uncertain with the band noted.
+  - Why not a full database: RadioReference is paid, per-user
+    authenticated, forbids mirroring, and offers no browser CORS. OpenMHz
+    is Cloudflare gated with no CORS. Neither can be bundled or called from
+    a static site. So the directory gives the system identity and the
+    operator adds the control channel.
+  - The trunked view groups the picker by state, and `makeCustomSystem`
+    plus a quick-add form takes a control frequency in MHz (looked up on
+    radioreference, linked in place) and saves a watchable system to
+    localStorage.
+- **Keys ui.** The encryption key panel (previous section) loads keys the
+  operator holds, kept in localStorage, applied to matching calls.
+- **Transcript log.** Every transcribed call is logged with a timestamp,
+  the talkgroup, the category and the text, newest first, saveable as a
+  text file. It fills while read codes is on.
+
 ## audit, 2026-10-03
 
 Before this deploy, three reviews ran in parallel over the uncommitted work:

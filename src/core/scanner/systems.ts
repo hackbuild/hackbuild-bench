@@ -43,6 +43,8 @@ export interface RadioSystem {
   sysId?: string
   wacn?: string
   nac?: number
+  /** The state or area this system serves, for the picker. */
+  region?: string
   sites: Site[]
   talkgroups: TalkgroupEntry[]
   /** Set on every field the app is not confident about, shown to the user. */
@@ -79,6 +81,7 @@ export interface ScanList {
 export const BUNDLED_SYSTEMS: RadioSystem[] = [
   {
     id: 'az-wins',
+    region: 'Arizona',
     name: 'AZ WINS (DPS statewide, phoenix and tucson)',
     type: 'p25p2',
     sysId: '049',
@@ -107,6 +110,7 @@ export const BUNDLED_SYSTEMS: RadioSystem[] = [
   },
   {
     id: 'phoenix-rwc',
+    region: 'Arizona',
     name: 'Phoenix RWC (regional wireless cooperative)',
     type: 'p25p2',
     sysId: '534',
@@ -147,6 +151,7 @@ export const BUNDLED_SYSTEMS: RadioSystem[] = [
   },
   {
     id: 'topaz-trwc',
+    region: 'Arizona',
     name: 'TOPAZ TRWC (mesa and east valley)',
     type: 'p25p2',
     sysId: '36B',
@@ -227,8 +232,92 @@ export function saveImportedSystems(systems: RadioSystem[]): void {
   }
 }
 
+/**
+ * Statewide P25 systems, one line each, from the Project 25 Technology
+ * Interest Group's public list of statewide systems (project25.org,
+ * revision 4-18-18) with later names. These carry the system identity and
+ * the state only, so the picker can offer "my state's system". The control
+ * channel frequency, which changes and which the compiled databases hold,
+ * is left for the operator to fill from a current source such as
+ * radioreference.com. Every entry is marked uncertain for that reason.
+ */
+const PTIG = 'project25.org statewide p25 list, rev 4-18-18'
+export const STATEWIDE_DIRECTORY: RadioSystem[] = [
+  { id: 'al-1st', name: 'Alabama 1st Responders', type: 'p25p2', region: 'Alabama', sites: [], talkgroups: [], uncertain: true, source: `${PTIG}. band: 700/800 MHz. add the control channel for your area.` },
+  { id: 'ak-almr', name: 'Alaska ALMR', type: 'p25p1', region: 'Alaska', sites: [], talkgroups: [], uncertain: true, source: `${PTIG}. band: VHF/700 MHz. add the control channel for your area.` },
+  { id: 'ar-awin', name: 'Arkansas AWIN', type: 'p25p1', region: 'Arkansas', sites: [], talkgroups: [], uncertain: true, source: `${PTIG}. band: 700/800 MHz. add the control channel for your area.` },
+  { id: 'co-dtrs', name: 'Colorado DTRS', type: 'p25p1', region: 'Colorado', sites: [], talkgroups: [], uncertain: true, source: `${PTIG}. band: 700/800 MHz, moving to phase 2. add the control channel for your area.` },
+  { id: 'ct-state', name: 'Connecticut statewide', type: 'p25p1', region: 'Connecticut', sites: [], talkgroups: [], uncertain: true, source: `${PTIG}. band: 700/800 MHz. add the control channel for your area.` },
+  { id: 'de-dps', name: 'Delaware DPS', type: 'p25p1', region: 'Delaware', sites: [], talkgroups: [], uncertain: true, source: `${PTIG}. band: 800 MHz. add the control channel for your area.` },
+  { id: 'hi-hir', name: 'Hawaii HIR', type: 'p25p1', region: 'Hawaii', sites: [], talkgroups: [], uncertain: true, source: `${PTIG}. band: 700 MHz. add the control channel for your area.` },
+  { id: 'id-icawin', name: 'Idaho ICAWIN', type: 'p25p1', region: 'Idaho', sites: [], talkgroups: [], uncertain: true, source: `${PTIG}. band: 700 MHz. add the control channel for your area.` },
+  { id: 'il-starcom', name: 'Illinois STARCOM21', type: 'p25p2', region: 'Illinois', sites: [], talkgroups: [], uncertain: true, source: `${PTIG}. band: 700/800 MHz. add the control channel for your area.` },
+  { id: 'in-safet', name: 'Indiana SAFE-T', type: 'p25p1', region: 'Indiana', sites: [], talkgroups: [], uncertain: true, source: `${PTIG}. band: 800 MHz. add the control channel for your area.` },
+  { id: 'ia-isics', name: 'Iowa ISICS', type: 'p25p2', region: 'Iowa', sites: [], talkgroups: [], uncertain: true, source: `${PTIG}. band: 700 MHz. add the control channel for your area.` },
+  { id: 'ks-ksics', name: 'Kansas KSICS', type: 'p25p1', region: 'Kansas', sites: [], talkgroups: [], uncertain: true, source: `${PTIG}. band: 700/800 MHz. add the control channel for your area.` },
+  { id: 'la-lwin', name: 'Louisiana LWIN', type: 'p25p1', region: 'Louisiana', sites: [], talkgroups: [], uncertain: true, source: `${PTIG}. band: 700 MHz. add the control channel for your area.` },
+  { id: 'me-mscs', name: 'Maine MSCS', type: 'p25p1', region: 'Maine', sites: [], talkgroups: [], uncertain: true, source: `${PTIG}. band: VHF. add the control channel for your area.` },
+  { id: 'md-frirs', name: 'Maryland FiRST', type: 'p25p2', region: 'Maryland', sites: [], talkgroups: [], uncertain: true, source: `${PTIG}. band: 700 MHz. add the control channel for your area.` },
+  { id: 'ma-cms', name: 'Massachusetts CoMIRS', type: 'p25p2', region: 'Massachusetts', sites: [], talkgroups: [], uncertain: true, source: `${PTIG}. band: 700/800 MHz. add the control channel for your area.` },
+  { id: 'mi-mpscs', name: 'Michigan MPSCS', type: 'p25p1', region: 'Michigan', sites: [], talkgroups: [], uncertain: true, source: `${PTIG}. band: 700/800 MHz. add the control channel for your area.` },
+  { id: 'mn-armer', name: 'Minnesota ARMER', type: 'p25p1', region: 'Minnesota', sites: [], talkgroups: [], uncertain: true, source: `${PTIG}. band: 800 MHz. add the control channel for your area.` },
+  { id: 'ms-mwin', name: 'Mississippi MWIN', type: 'p25p2', region: 'Mississippi', sites: [], talkgroups: [], uncertain: true, source: `${PTIG}. band: 700/800 MHz. add the control channel for your area.` },
+  { id: 'mo-mswin', name: 'Missouri MOSWIN', type: 'p25p2', region: 'Missouri', sites: [], talkgroups: [], uncertain: true, source: `${PTIG}. band: VHF/700/800 MHz. add the control channel for your area.` },
+  { id: 'mt-msirs', name: 'Montana statewide', type: 'p25p1', region: 'Montana', sites: [], talkgroups: [], uncertain: true, source: `${PTIG}. band: VHF. add the control channel for your area.` },
+  { id: 'ne-nsrs', name: 'Nebraska NSRS', type: 'p25p1', region: 'Nebraska', sites: [], talkgroups: [], uncertain: true, source: `${PTIG}. band: VHF. add the control channel for your area.` },
+  { id: 'nh-state', name: 'New Hampshire statewide', type: 'p25p1', region: 'New Hampshire', sites: [], talkgroups: [], uncertain: true, source: `${PTIG}. band: VHF. add the control channel for your area.` },
+  { id: 'nj-njics', name: 'New Jersey NJICS', type: 'p25p2', region: 'New Jersey', sites: [], talkgroups: [], uncertain: true, source: `${PTIG}. band: 700 MHz. add the control channel for your area.` },
+  { id: 'nc-viper', name: 'North Carolina VIPER', type: 'p25p1', region: 'North Carolina', sites: [], talkgroups: [], uncertain: true, source: `${PTIG}. band: 700/800 MHz. add the control channel for your area.` },
+  { id: 'oh-marcs', name: 'Ohio MARCS-IP', type: 'p25p2', region: 'Ohio', sites: [], talkgroups: [], uncertain: true, source: `${PTIG}. band: 800 MHz. add the control channel for your area.` },
+  { id: 'ok-owin', name: 'Oklahoma OKWIN', type: 'p25p1', region: 'Oklahoma', sites: [], talkgroups: [], uncertain: true, source: `${PTIG}. band: 800 MHz. add the control channel for your area.` },
+  { id: 'or-srp', name: 'Oregon SRP', type: 'p25p2', region: 'Oregon', sites: [], talkgroups: [], uncertain: true, source: `${PTIG}. band: 700 MHz. add the control channel for your area.` },
+  { id: 'ri-scn', name: 'Rhode Island SCN', type: 'p25p1', region: 'Rhode Island', sites: [], talkgroups: [], uncertain: true, source: `${PTIG}. band: 800 MHz. add the control channel for your area.` },
+  { id: 'sc-palmetto', name: 'South Carolina PALMETTO 800', type: 'p25p1', region: 'South Carolina', sites: [], talkgroups: [], uncertain: true, source: `${PTIG}. band: 700/800 MHz. add the control channel for your area.` },
+  { id: 'sd-srs', name: 'South Dakota SRS', type: 'p25p1', region: 'South Dakota', sites: [], talkgroups: [], uncertain: true, source: `${PTIG}. band: VHF. add the control channel for your area.` },
+  { id: 'tn-acn', name: 'Tennessee ACN', type: 'p25p2', region: 'Tennessee', sites: [], talkgroups: [], uncertain: true, source: `${PTIG}. band: 700/800 MHz. add the control channel for your area.` },
+  { id: 'va-stars', name: 'Virginia STARS', type: 'p25p1', region: 'Virginia', sites: [], talkgroups: [], uncertain: true, source: `${PTIG}. band: VHF/700 MHz. add the control channel for your area.` },
+  { id: 'wa-wsp', name: 'Washington State Police', type: 'p25p2', region: 'Washington', sites: [], talkgroups: [], uncertain: true, source: `${PTIG}. band: 700 MHz. add the control channel for your area.` },
+  { id: 'wv-sirn', name: 'West Virginia SIRN', type: 'p25p1', region: 'West Virginia', sites: [], talkgroups: [], uncertain: true, source: `${PTIG}. band: UHF. add the control channel for your area.` },
+  { id: 'wi-wiscom', name: 'Wisconsin WISCOM', type: 'p25p1', region: 'Wisconsin', sites: [], talkgroups: [], uncertain: true, source: `${PTIG}. band: VHF/800 MHz. add the control channel for your area.` },
+  { id: 'wy-wyolink', name: 'Wyoming WyoLink', type: 'p25p1', region: 'Wyoming', sites: [], talkgroups: [], uncertain: true, source: `${PTIG}. band: VHF/800 MHz. add the control channel for your area.` },
+  { id: 'fl-slers', name: 'Florida SLERS', type: 'p25p1', region: 'Florida', sites: [], talkgroups: [], uncertain: true, source: `${PTIG}. band: 800 MHz. add the control channel for your area.` },
+  { id: 'tx-warn', name: 'Texas WARN (Panhandle)', type: 'p25p1', region: 'Texas', sites: [], talkgroups: [], uncertain: true, source: `${PTIG}. band: 700/800 MHz. add the control channel for your area.` },
+]
+
 export function allSystems(): RadioSystem[] {
-  return [...BUNDLED_SYSTEMS, ...loadImportedSystems()]
+  return [...BUNDLED_SYSTEMS, ...loadImportedSystems(), ...STATEWIDE_DIRECTORY]
+}
+
+/** The states that have at least one system, sorted, for the picker. */
+export function regionsWithSystems(): string[] {
+  const set = new Set<string>()
+  for (const s of allSystems()) if (s.region) set.add(s.region)
+  return [...set].sort()
+}
+
+/**
+ * Builds a custom system the user can watch, from a name, a state, and one
+ * or more control channel frequencies in Hz. It is saved alongside the
+ * imported systems. When `baseId` names a directory system, its identity is
+ * carried over, so "add a control channel to Ohio MARCS" keeps the name.
+ */
+export function makeCustomSystem(
+  name: string,
+  region: string,
+  controlHz: number[],
+  baseId?: string,
+): RadioSystem {
+  const base = baseId ? STATEWIDE_DIRECTORY.find((d) => d.id === baseId) : undefined
+  return {
+    id: `custom-${Date.now().toString(36)}`,
+    name: name || base?.name || 'custom system',
+    type: base?.type ?? 'p25p1',
+    region: region || base?.region,
+    sites: [{ id: 'site-1', name: 'added control channel', controlHz }],
+    talkgroups: [],
+    uncertain: true,
+    source: 'added by the operator',
+  }
 }
 
 export function systemById(id: string): RadioSystem | undefined {

@@ -18,7 +18,8 @@ import InstKnob from '@/components/instruments/InstKnob.vue'
 import type { ParamSpec } from '@/core/types'
 import type { P25Stats } from '@/core/scanner/p25/receiver'
 import { bus } from '@/core/bus/DeviceBus'
-import { allSystems } from '@/core/scanner/systems'
+import { allSystems, makeCustomSystem, regionsWithSystems, saveImportedSystems, loadImportedSystems } from '@/core/scanner/systems'
+import { parseFrequency } from '@/core/dsp/spectrumMath'
 import type { RadioSystem } from '@/core/scanner/systems'
 import { SERVICE_LABELS } from '@/core/scanner/conventional'
 import { fixedWindow, reaches } from '@/core/dsp/spectrumMath'
@@ -46,9 +47,50 @@ const isDemo = computed(() => (node.value ? isSimKind(node.value.kind) : false))
 const centerSpec = computed(() => node.value?.descriptor.params.find((p) => p.key === 'centerHz'))
 const rateSpec = computed(() => node.value?.descriptor.params.find((p) => p.key === 'sampleRate'))
 
-const systems = allSystems()
-const systemId = ref(systems[0]?.id ?? '')
+const systems = ref(allSystems())
+const regions = computed(() => regionsWithSystems())
+const region = ref('Arizona')
+const inRegion = computed(() => systems.value.filter((s) => s.region === region.value))
+const systemId = ref('')
 const siteIndex = ref(0)
+
+// keep a system selected as the region changes.
+watch(
+  [region, systems],
+  () => {
+    if (!inRegion.value.some((s) => s.id === systemId.value)) systemId.value = inRegion.value[0]?.id ?? ''
+  },
+  { immediate: true },
+)
+
+// add a control channel for a system the directory lists without one, or a
+// system of the operator's own.
+const showAdd = ref(false)
+const addName = ref('')
+const addFreq = ref('')
+const addError = ref<string | null>(null)
+function addSystem(): void {
+  addError.value = null
+  const freqs = addFreq.value
+    .split(/[,\s]+/)
+    .filter(Boolean)
+    .map(parseFrequency)
+  if (!freqs.length || freqs.some((f) => f === null)) {
+    addError.value = 'give the control channel in mhz, for example 853.35. separate several with a comma.'
+    return
+  }
+  const base = systems.value.find((x) => x.id === systemId.value && !x.sites.length)
+  const sys = makeCustomSystem(addName.value, region.value, freqs as number[], base?.id)
+  const imported = [...loadImportedSystems(), sys]
+  saveImportedSystems(imported)
+  systems.value = allSystems()
+  systemId.value = sys.id
+  siteIndex.value = 0
+  controlIndex.value = 0
+  showAdd.value = false
+  addName.value = ''
+  addFreq.value = ''
+}
 /** Which of the site's listed control frequencies is being tried. */
 const controlIndex = ref(0)
 const running = ref(false)
@@ -60,7 +102,7 @@ const error = ref<string | null>(null)
 /** Listed control frequencies tried without a sync, in this run. */
 const triedSilent = ref(0)
 
-const system = computed<RadioSystem | undefined>(() => systems.find((s) => s.id === systemId.value))
+const system = computed<RadioSystem | undefined>(() => systems.value.find((s) => s.id === systemId.value))
 const site = computed(() => system.value?.sites[siteIndex.value])
 const controlList = computed(() => site.value?.controlHz ?? [])
 const controlHz = computed(() => controlList.value[controlIndex.value] ?? controlList.value[0] ?? 0)
@@ -154,6 +196,19 @@ function saveClip(call: TrunkCall, clip: Float32Array, rate: number): void {
 const readCodes = ref(true)
 const codeBook = CODE_BOOKS[0]
 
+/** A timestamped line for every call that was transcribed, newest first. */
+interface LogLine {
+  at: number
+  talkgroup: number
+  name: string
+  hz: number
+  category?: string
+  codes: string[]
+  text: string
+}
+const transcriptLog = ref<LogLine[]>([])
+const MAX_LOG = 500
+
 async function transcribeCall(call: TrunkCall, clip: Float32Array, rate: number): Promise<void> {
   if (!readCodes.value || !ears.ready.value || clip.length < rate * 0.6) return
   const text = (await ears.transcribeClip(clip, rate)).trim()
@@ -166,7 +221,39 @@ async function transcribeCall(call: TrunkCall, clip: Float32Array, rate: number)
     live.codes = found
     live.category = topCategory(found) ?? undefined
   }
-  calls.value = [...calls.value]
+  transcriptLog.value = [
+    {
+      at: call.startedAt,
+      talkgroup: call.talkgroup,
+      name: call.name,
+      hz: call.hz,
+      category: live.category,
+      codes: found.map((h) => h.code),
+      text,
+    },
+    ...transcriptLog.value,
+  ].slice(0, MAX_LOG)
+}
+
+function clearLog(): void {
+  transcriptLog.value = []
+}
+
+/** The log as plain text, newest last, for saving. */
+function saveLog(): void {
+  const lines = [...transcriptLog.value].reverse().map((l) => {
+    const t = new Date(l.at).toISOString().replace('T', ' ').slice(0, 19)
+    const cat = l.category ? ` [${l.category}]` : ''
+    const codes = l.codes.length ? ` (${l.codes.join(', ')})` : ''
+    return `${t}  ${l.name} tg ${l.talkgroup} ${(l.hz / 1e6).toFixed(5)} mhz${cat}${codes}: ${l.text}`
+  })
+  const head = `hackbuild bench, p25 transcript log, ${system.value?.name ?? ''}\n\n`
+  const blob = new Blob([head + lines.join('\n') + '\n'], { type: 'text/plain' })
+  const a = document.createElement('a')
+  a.href = URL.createObjectURL(blob)
+  a.download = `p25_log_${new Date().toISOString().replace(/[:.]/g, '-')}.txt`
+  a.click()
+  window.setTimeout(() => URL.revokeObjectURL(a.href), 1000)
 }
 
 const voice = new VoiceFollower(
@@ -402,10 +489,16 @@ onBeforeUnmount(() => {
     </p>
 
     <div class="bn-knobs" style="margin-top: 0">
+      <div class="bn-knob" style="min-width: 140px">
+        <span class="bn-klabel">state</span>
+        <select v-model="region" :disabled="running">
+          <option v-for="r in regions" :key="r" :value="r">{{ r }}</option>
+        </select>
+      </div>
       <div class="bn-knob" style="min-width: 240px">
         <span class="bn-klabel">system</span>
         <select v-model="systemId" :disabled="running" @change="siteIndex = 0; controlIndex = 0">
-          <option v-for="s in systems" :key="s.id" :value="s.id">{{ s.name }}</option>
+          <option v-for="s in inRegion" :key="s.id" :value="s.id">{{ s.name }}</option>
         </select>
       </div>
       <div class="bn-knob" style="min-width: 200px" v-if="system && system.sites.length">
@@ -427,13 +520,25 @@ onBeforeUnmount(() => {
       </div>
     </div>
 
-    <div v-if="system && !system.sites.length" class="bn-banner is-warn">
-      <HbIcon name="warning" />
-      <span>
-        this system has no control channel frequency bundled, and this build has no way
-        to add one. pick a system that has sites listed.
-      </span>
+    <div v-if="system && !system.sites.length" class="bn-note tr-tight">
+      this system is in the directory by name only. its control channel changes and is not
+      bundled. find it for your area on
+      <a class="bn-linkish" href="https://www.radioreference.com/db/aliases/trs" target="_blank" rel="noopener">radioreference</a>,
+      then
+      <button type="button" class="bn-linkish" @click="showAdd = !showAdd">add the control channel</button>.
     </div>
+    <div v-else class="bn-note tr-tight">
+      <button type="button" class="bn-linkish" @click="showAdd = !showAdd">add another system or control channel</button>.
+      only the states with a bundled or added system appear. for the full directory see
+      <a class="bn-linkish" href="https://www.radioreference.com/db/aliases/trs" target="_blank" rel="noopener">radioreference</a>.
+    </div>
+
+    <form v-if="showAdd" class="bn-goto tr-addsys" @submit.prevent="addSystem">
+      <HbInput v-model="addName" :placeholder="system?.name ?? 'system name'" aria-label="system name" />
+      <HbInput v-model="addFreq" placeholder="control mhz, eg 853.35" aria-label="control channel frequency" />
+      <HbButton size="sm" type="submit">add</HbButton>
+    </form>
+    <p v-if="addError" class="bn-note" role="alert">{{ addError }}</p>
 
     <div class="bn-meta">
       <div>
@@ -608,6 +713,26 @@ onBeforeUnmount(() => {
       encrypted talkgroups show as active but produce no audio. most arizona law tactical
       is encrypted; fire dispatch and the interop channels are usually in the clear.
     </p>
+
+    <div v-if="!isDemo" class="bn-subhead tr-loghead">
+      transcript log
+      <span class="bn-aside">{{ transcriptLog.length }} calls, newest first</span>
+      <span class="bn-grow"></span>
+      <button type="button" class="bn-tinyact" :disabled="!transcriptLog.length" @click="saveLog">save</button>
+      <button type="button" class="bn-tinyact" :disabled="!transcriptLog.length" @click="clearLog">clear</button>
+    </div>
+    <div v-if="!isDemo" class="tr-log">
+      <div v-for="(l, i) in transcriptLog" :key="i" class="tr-logline">
+        <span class="tr-logt">{{ new Date(l.at).toLocaleTimeString() }}</span>
+        <span class="tr-logtg">{{ l.name }}</span>
+        <span v-if="l.category" class="tr-cat" :style="{ color: CATEGORY_COLOR[l.category as keyof typeof CATEGORY_COLOR] }">{{ l.category }}</span>
+        <span class="tr-logtx">{{ l.text }}</span>
+      </div>
+      <div v-if="!transcriptLog.length" class="bn-note tr-tight">
+        turn on read codes and the calls you hear are transcribed here with the time, the
+        talkgroup and what it was about.
+      </div>
+    </div>
   </div>
 </template>
 
@@ -625,6 +750,9 @@ onBeforeUnmount(() => {
 }
 .tr-tight {
   margin-top: 0;
+}
+.tr-addsys {
+  margin-top: var(--hb-s2);
 }
 .tr-keys {
   margin: var(--hb-s3) 0;
@@ -648,5 +776,42 @@ onBeforeUnmount(() => {
 }
 .tr-pin {
   margin-left: var(--hb-s2);
+}
+.tr-loghead {
+  margin-top: var(--hb-s4);
+}
+.tr-log {
+  border: var(--hb-border) solid var(--hb-ink);
+  background: var(--hb-paper-raised);
+  max-height: 320px;
+  overflow-y: auto;
+}
+.tr-logline {
+  display: flex;
+  gap: var(--hb-s2);
+  align-items: baseline;
+  flex-wrap: wrap;
+  padding: var(--hb-s1) var(--hb-s3);
+  border-bottom: 1px solid var(--hb-paper-edge);
+  font-size: 12px;
+}
+.tr-logline:last-child {
+  border-bottom: 0;
+}
+.tr-logt {
+  font-family: var(--hb-readout);
+  color: var(--hb-ink-3);
+}
+.tr-logtg {
+  font-family: var(--hb-utility);
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--hb-ink-2);
+}
+.tr-logtx {
+  font-family: var(--hb-body);
+  color: var(--hb-ink);
+  flex: 1 1 60%;
 }
 </style>
