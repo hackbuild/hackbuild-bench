@@ -454,12 +454,18 @@ export class ImbeDecoder {
     move(p, this.prevEnhanced)
   }
 
-  /** One 144 bit frame in, 20 ms of audio out. The frame is corrected in place. */
-  decode(frame: ImbeFrame): ImbeResult {
+  /**
+   * One 144 bit frame in, 20 ms of audio out. The frame is corrected in
+   * place. `decrypt`, when given, is handed the 88 recovered parameter bits
+   * to undo encryption before they are read, which an authorised listener
+   * uses with a key already held.
+   */
+  decode(frame: ImbeFrame, decrypt?: (bits: Int8Array) => void): ImbeResult {
     const audio = new Float32Array(N)
     const errs = eccC0(frame)
     demodulate(frame)
     const errs2 = errs + eccData(frame, this.data)
+    decrypt?.(this.data)
     const ok = decodeParms(this.data, this.cur, this.prev)
     let repeated = false
     if (!ok || errs2 > 5) {

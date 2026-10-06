@@ -44,19 +44,66 @@ export function imbeFrames(dibits: ArrayLike<number>): ImbeFrame[] {
   })
 }
 
-/** Where the encryption sync's words start in an LDU2: after the fifth IMBE frame. */
-const ES_WORDS_AT = 420
-
 /**
- * The encryption algorithm an LDU2 names, 0x80 for clear voice. It sits in
- * the first six bits of one link word and the first two of the next, read
- * here without the word's Hamming check, so a caller should want the same
- * answer twice before acting on it.
+ * The encryption sync an LDU2 carries, read from its 16 six bit hex words.
+ *
+ * The words sit in 20 dibit regions after the second through fifth IMBE
+ * frames, four to a region, highest word first, as TIA-102.BAAA lays them
+ * out and DSD reads them. Reed-Solomon over the words is not applied, so a
+ * caller should want the same answer from two LDU2s before acting on it.
  */
+
+/** The dibit position where each of the 16 hex words (15 down to 0) begins. */
+const HEX_WORD_AT: number[] = (() => {
+  const at: number[] = []
+  // regions after frames 1..4, each holding four words of five dibits.
+  for (let k = 1; k <= 4; k++) {
+    const base = [0, 72, 164, 256, 348][k] + 72
+    for (let w = 0; w < 4; w++) at.push(base + w * 5)
+  }
+  return at // at[0] is word 15, at[15] is word 0.
+})()
+
+/** The six bit value of hex word `w` (0 to 15), from its three data dibits. */
+function hexWord(dibits: ArrayLike<number>, w: number): number {
+  const p = HEX_WORD_AT[15 - w]
+  return ((dibits[p] & 3) << 4) | ((dibits[p + 1] & 3) << 2) | (dibits[p + 2] & 3)
+}
+
+export interface EncryptionSync {
+  /** The cipher, 0x80 for clear. */
+  algid: number
+  /** The key the talker used, which the listener needs the value of. */
+  keyId: number
+  /** The 72 bit message indicator, nine bytes, which seeds the keystream. */
+  mi: Uint8Array
+}
+
+export function ldu2Sync(dibits: ArrayLike<number>): EncryptionSync {
+  const mi = new Uint8Array(9)
+  // words 15 down to 4 are the 72 bit mi, six bits each, most significant first.
+  const bits: number[] = []
+  for (let w = 15; w >= 4; w--) {
+    const v = hexWord(dibits, w)
+    for (let b = 5; b >= 0; b--) bits.push((v >> b) & 1)
+  }
+  for (let i = 0; i < 9; i++) {
+    let byte = 0
+    for (let b = 0; b < 8; b++) byte = (byte << 1) | bits[i * 8 + b]
+    mi[i] = byte
+  }
+  const word3 = hexWord(dibits, 3)
+  const word2 = hexWord(dibits, 2)
+  const word1 = hexWord(dibits, 1)
+  const word0 = hexWord(dibits, 0)
+  const algid = ((word3 << 2) | (word2 >> 4)) & 0xff
+  const keyId = (((word2 & 0xf) << 12) | (word1 << 6) | word0) & 0xffff
+  return { algid, keyId, mi }
+}
+
+/** The cipher an LDU2 names, 0x80 for clear voice. */
 export function ldu2Algid(dibits: ArrayLike<number>): number {
-  const a = ES_WORDS_AT
-  const b = ES_WORDS_AT + 5
-  return ((dibits[a] & 3) << 6) | ((dibits[a + 1] & 3) << 4) | ((dibits[a + 2] & 3) << 2) | (dibits[b] & 3)
+  return ldu2Sync(dibits).algid
 }
 
 export const ALGID_CLEAR = 0x80

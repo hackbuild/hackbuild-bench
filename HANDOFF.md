@@ -490,6 +490,37 @@ are about.
   are encrypted anyway. Whisper on scanner audio is rough, so a missed or
   wrong code is expected.
 
+### p25 keys and code tagging, 2026-10-05
+
+Two separate things landed: applying keys an operator holds, and reading
+dispatch codes.
+
+- **Keys.** `src/core/scanner/p25/crypto/` applies a key the operator has
+  loaded, the lawful use of a key already in hand. It cracks nothing, tries
+  no keys, and reads none off the air.
+  - `ciphers.ts` is RC4 (ADP), DES-OFB and AES-256-OFB, each checked
+    against its published test vector (RC4 "Key"/"Plaintext", the DES known
+    answer, the FIPS-197 AES-256 vector).
+  - `index.ts` places the keystream onto the voice codewords the way op25
+    does (GPL-3, following TIA-102.AAAD), with a key store keyed on key id.
+  - The MI, algid and key id come from the LDU2 encryption sync
+    (`imbe/ldu.ts` `ldu2Sync`), and op25's convention is followed: an
+    LDU2's sync keys the next superframe.
+  - `useP25Keys` keeps keys in localStorage, this browser only. The
+    trunked view has a key panel and shows "decrypting with key 0xN" when a
+    loaded key matches.
+  - **Validation.** The ciphers pass their vectors. The whole keystream
+    placement round-trips exactly: encrypting then decrypting 693 real
+    voice frames per algorithm recovers every bit, with 98.7 percent of
+    frames actually scrambled in between. Not yet confirmed against real
+    keyed off-air traffic, which needs a lawful key. An authorised user
+    with their key can confirm it live.
+- **Recording.** "save calls" writes each heard call to a .wav
+  (`core/audio/wav.ts`), named by talkgroup and time.
+- **Dispatch codes.** `src/core/scanner/codes/` reads codes out of the
+  transcript (see the earlier section) against the Phoenix PD list and
+  tags each call by category.
+
 ## audit, 2026-10-03
 
 Before this deploy, three reviews ran in parallel over the uncommitted work:
@@ -718,6 +749,7 @@ Close ports that inherit their source's license:
 - the ISM sensor decoder, from rtl_433, GPL-2.0-or-later
 - the ADS-B demodulator and frame scoring, from dump1090-fa, GPL-2.0-or-later
 - the ACARS demodulator and repair, from acarsdec, which says LGPL
+- the p25 voice keystream placement, from op25, GPL-2+/GPL-3. The ciphers themselves (RC4, DES, AES) are public standards, written from them.
 
 Written from the standards after reading the reference code:
 

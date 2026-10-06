@@ -10,6 +10,10 @@ import { VoiceFollower } from '@/core/scanner/p25/voice'
 import { AudioSink } from '@/core/audio/AudioSink'
 import { useTranscription } from '@/composables/useTranscription'
 import { findCodes, topCategory, CATEGORY_COLOR, CODE_BOOKS } from '@/core/scanner/codes'
+import { useP25Keys } from '@/composables/useP25Keys'
+import { ALGID_NAME, KEY_BYTES } from '@/core/scanner/p25/crypto'
+import { floatsToWav } from '@/core/audio/wav'
+import { HbInput, HbSelect } from '@virgilvox/hackbuild-ui'
 import InstKnob from '@/components/instruments/InstKnob.vue'
 import type { ParamSpec } from '@/core/types'
 import type { P25Stats } from '@/core/scanner/p25/receiver'
@@ -94,6 +98,9 @@ let lastSyncAt = 0
 /** Play calls as they come. */
 const hear = ref(true)
 const hearing = shallowRef<TrunkCall | null>(null)
+/** Mirrors of the follower's decrypt state, for the status line. */
+const decrypting = ref(false)
+const encKeyId = ref(0)
 /** A talkgroup picked from the list, heard ahead of anything else. */
 const pinned = ref<number | null>(null)
 const VOLUME: ParamSpec = { key: 'volume', label: 'volume', min: 0, max: 100, step: 1, default: 72 }
@@ -104,6 +111,45 @@ let windowCenter = 0
 let windowRate = 0
 
 const ears = useTranscription(props.deviceId)
+const p25Keys = useP25Keys()
+watch(p25Keys.keys, (ks) => voice.setKeys(ks), { deep: true })
+
+// adding a key
+const keyIdIn = ref('')
+const keyAlg = ref(0xaa)
+const keyIn = ref('')
+const KEY_ALGS = [
+  { label: 'adp (rc4)', value: 0xaa },
+  { label: 'des-ofb', value: 0x81 },
+  { label: 'aes-256', value: 0x84 },
+]
+function addKey(): void {
+  if (p25Keys.add(keyIdIn.value, keyAlg.value, keyIn.value)) {
+    keyIdIn.value = ''
+    keyIn.value = ''
+    voice.setKeys(p25Keys.keys.value)
+  }
+}
+function keyHint(alg: number): string {
+  return `${KEY_BYTES[alg]} bytes, ${KEY_BYTES[alg] * 2} hex digits`
+}
+function encName(alg: number): string {
+  return ALGID_NAME[alg] ?? `alg 0x${alg.toString(16)}`
+}
+
+// saving call audio
+const saveCalls = ref(false)
+function saveClip(call: TrunkCall, clip: Float32Array, rate: number): void {
+  if (clip.length < rate * 0.4) return
+  const blob = floatsToWav(clip, rate)
+  const name = `p25_${call.talkgroup}_${new Date(call.startedAt).toISOString().replace(/[:.]/g, '-')}.wav`
+  const a = document.createElement('a')
+  a.href = URL.createObjectURL(blob)
+  a.download = name
+  a.click()
+  window.setTimeout(() => URL.revokeObjectURL(a.href), 1000)
+  bus.emitDecoded(props.deviceId, { kind: 'blob', mime: 'audio/wav', name, bytes: new Uint8Array() })
+}
 /** Read codes out of what is said and tag the call. */
 const readCodes = ref(true)
 const codeBook = CODE_BOOKS[0]
@@ -127,11 +173,17 @@ const voice = new VoiceFollower(
   (samples, rate) => {
     sink?.push(samples, rate)
     bus.emitAudio(props.deviceId, samples.slice(), rate)
+    decrypting.value = voice.decrypting
+    encKeyId.value = voice.encKeyId
   },
   (clip, rate) => {
     const c = hearing.value
     hearing.value = null
-    if (c && clip.length) void transcribeCall(c, clip, rate)
+    decrypting.value = false
+    if (c && clip.length) {
+      void transcribeCall(c, clip, rate)
+      if (saveCalls.value) saveClip(c, clip, rate)
+    }
     pickCall()
   },
   () => {
@@ -277,6 +329,7 @@ async function start(): Promise<void> {
     await sink.resume()
     sink.setVolume(volume.value / 100)
     if (readCodes.value) void ears.enable()
+    voice.setKeys(p25Keys.keys.value)
     decoder = new P25Receiver({ onTsbk: (octets) => follower?.feedTsbk(octets) })
     unsubscribe = bus.onDeviceArtifact(props.deviceId, (a) => {
       if (a.kind !== 'iq') return
@@ -452,14 +505,42 @@ onBeforeUnmount(() => {
       <button type="button" class="bn-pack" :class="{ 'is-on': hear }" :aria-pressed="hear" @click="toggleHear">
         hear calls
       </button>
+      <button type="button" class="bn-pack" :class="{ 'is-on': readCodes }" :aria-pressed="readCodes" @click="readCodes = !readCodes">
+        read codes
+      </button>
+      <button type="button" class="bn-pack" :class="{ 'is-on': saveCalls }" :aria-pressed="saveCalls" @click="saveCalls = !saveCalls">
+        save calls
+      </button>
       <InstKnob v-model="volume" :spec="VOLUME" />
       <div class="tr-hearing" role="status">
         <template v-if="hearing">
           hearing {{ hearing.name }} on {{ formatHz(hearing.hz, 5) }}
+          <span v-if="decrypting">, decrypting with key 0x{{ encKeyId.toString(16) }}</span>
         </template>
-        <template v-else-if="running && hear">waiting for a clear phase 1 call inside the window</template>
+        <template v-else-if="running && hear">waiting for a call this radio can play</template>
       </div>
     </div>
+
+    <details v-if="!isDemo" class="tr-keys">
+      <summary class="bn-note">encryption keys ({{ p25Keys.keys.value.length }} loaded)</summary>
+      <p class="bn-note tr-tight">
+        load a key your agency issued you and this tool will play that key's calls, the same as
+        your own radio. keys stay in this browser. this does not break encryption or find keys.
+      </p>
+      <div v-for="k in p25Keys.keys.value" :key="k.keyId" class="tr-keyrow">
+        <span class="bn-b">key 0x{{ k.keyId.toString(16) }}</span>
+        <span>{{ encName(k.algid) }}</span>
+        <span>{{ k.key.length }} bytes</span>
+        <button type="button" class="bn-tinyact" @click="p25Keys.remove(k.keyId)">remove</button>
+      </div>
+      <form class="bn-goto tr-addkey" @submit.prevent="addKey">
+        <HbInput v-model="keyIdIn" placeholder="key id, eg 2" aria-label="key id in hex" />
+        <HbSelect v-model="keyAlg" :options="KEY_ALGS" aria-label="algorithm" />
+        <HbInput v-model="keyIn" :placeholder="keyHint(keyAlg)" aria-label="key in hex" />
+        <HbButton size="sm" type="submit">add key</HbButton>
+      </form>
+      <p v-if="p25Keys.error.value" class="bn-note" role="alert">{{ p25Keys.error.value }}</p>
+    </details>
     <p v-if="!isDemo" class="bn-note tr-tight">
       clear phase 1 calls inside the radio's window play here, read by an imbe vocoder. phase 2
       calls use ambe+2, which is under patent until may 2028, and stay silent, as do encrypted
@@ -544,6 +625,23 @@ onBeforeUnmount(() => {
 }
 .tr-tight {
   margin-top: 0;
+}
+.tr-keys {
+  margin: var(--hb-s3) 0;
+}
+.tr-keys > summary {
+  cursor: pointer;
+}
+.tr-keyrow {
+  display: flex;
+  gap: var(--hb-s3);
+  align-items: center;
+  font-family: var(--hb-utility);
+  font-size: 11px;
+  margin: var(--hb-s1) 0;
+}
+.tr-addkey {
+  margin-top: var(--hb-s2);
 }
 .tr-on {
   font-weight: 700;
