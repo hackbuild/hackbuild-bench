@@ -22,10 +22,19 @@ export class VoiceFollower {
   /** The algorithm the last LDU2 named, and how many in a row agreed. */
   private algid = ALGID_CLEAR
   private algidRun = 0
+  /**
+   * Speech held until an LDU2 says the call is clear. The grant's own
+   * encryption flag is not always set, and encrypted voice decodes into
+   * noise, so nothing plays until the voice itself has been checked.
+   */
+  private held: Float32Array[] = []
+  private cleared = false
+  /** The whole call's audio, kept so it can be transcribed when it ends. */
+  private clip: Float32Array[] = []
 
   constructor(
     private readonly onAudio: (samples: Float32Array, sampleRate: number) => void,
-    private readonly onEnd: () => void,
+    private readonly onEnd: (clip: Float32Array, sampleRate: number) => void,
     /** The call turned out encrypted, so it was muted and let go. */
     private readonly onEncrypted: (algid: number) => void = () => undefined,
   ) {}
@@ -45,6 +54,9 @@ export class VoiceFollower {
     this.corrected = 0
     this.algid = ALGID_CLEAR
     this.algidRun = 0
+    this.held = []
+    this.cleared = false
+    this.clip = []
     this.lastFrameAt = performance.now()
     this.rx = new P25Receiver(
       {
@@ -55,9 +67,15 @@ export class VoiceFollower {
             this.algid = a
             // encrypted voice decodes cleanly into noise, so it is not played.
             if (a !== ALGID_CLEAR && this.algidRun >= 2) {
+              this.held = []
               this.onEncrypted(a)
               this.end()
               return
+            }
+            if (a === ALGID_CLEAR && !this.cleared) {
+              this.cleared = true
+              for (const chunk of this.held) this.onAudio(chunk, AUDIO_RATE)
+              this.held = []
             }
           }
           const frames = imbeFrames(dibits)
@@ -69,7 +87,9 @@ export class VoiceFollower {
           })
           this.frames += frames.length
           this.lastFrameAt = performance.now()
-          this.onAudio(audio, AUDIO_RATE)
+          this.clip.push(audio)
+          if (this.cleared) this.onAudio(audio, AUDIO_RATE)
+          else this.held.push(audio)
         },
         onEnd: () => this.end(),
       },
@@ -84,14 +104,25 @@ export class VoiceFollower {
     if (performance.now() - this.lastFrameAt > QUIET_MS) this.end()
   }
 
-  /** Lets go of the channel, as at the end of a call. */
+  /** Lets go of the channel, as at the end of a call. The clip goes out for transcription. */
   end(): void {
     if (!this.rx) return
     this.rx = null
-    this.onEnd()
+    const total = this.clip.reduce((n, c) => n + c.length, 0)
+    const clip = new Float32Array(this.cleared ? total : 0)
+    if (this.cleared) {
+      let at = 0
+      for (const c of this.clip) {
+        clip.set(c, at)
+        at += c.length
+      }
+    }
+    this.clip = []
+    this.onEnd(clip, AUDIO_RATE)
   }
 
   stop(): void {
     this.rx = null
+    this.clip = []
   }
 }

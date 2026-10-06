@@ -8,6 +8,8 @@ import { DemoControlChannel } from '@/core/scanner/p25/demo'
 import { P25Receiver } from '@/core/scanner/p25/receiver'
 import { VoiceFollower } from '@/core/scanner/p25/voice'
 import { AudioSink } from '@/core/audio/AudioSink'
+import { useTranscription } from '@/composables/useTranscription'
+import { findCodes, topCategory, CATEGORY_COLOR, CODE_BOOKS } from '@/core/scanner/codes'
 import InstKnob from '@/components/instruments/InstKnob.vue'
 import type { ParamSpec } from '@/core/types'
 import type { P25Stats } from '@/core/scanner/p25/receiver'
@@ -101,13 +103,35 @@ let sink: AudioSink | null = null
 let windowCenter = 0
 let windowRate = 0
 
+const ears = useTranscription(props.deviceId)
+/** Read codes out of what is said and tag the call. */
+const readCodes = ref(true)
+const codeBook = CODE_BOOKS[0]
+
+async function transcribeCall(call: TrunkCall, clip: Float32Array, rate: number): Promise<void> {
+  if (!readCodes.value || !ears.ready.value || clip.length < rate * 0.6) return
+  const text = (await ears.transcribeClip(clip, rate)).trim()
+  if (!text) return
+  const found = findCodes(text, codeBook)
+  const live = calls.value.find((c) => c.id === call.id)
+  if (!live) return
+  live.transcript = text
+  if (found.length) {
+    live.codes = found
+    live.category = topCategory(found) ?? undefined
+  }
+  calls.value = [...calls.value]
+}
+
 const voice = new VoiceFollower(
   (samples, rate) => {
     sink?.push(samples, rate)
     bus.emitAudio(props.deviceId, samples.slice(), rate)
   },
-  () => {
+  (clip, rate) => {
+    const c = hearing.value
     hearing.value = null
+    if (c && clip.length) void transcribeCall(c, clip, rate)
     pickCall()
   },
   () => {
@@ -252,6 +276,7 @@ async function start(): Promise<void> {
     sink ??= new AudioSink()
     await sink.resume()
     sink.setVolume(volume.value / 100)
+    if (readCodes.value) void ears.enable()
     decoder = new P25Receiver({ onTsbk: (octets) => follower?.feedTsbk(octets) })
     unsubscribe = bus.onDeviceArtifact(props.deviceId, (a) => {
       if (a.kind !== 'iq') return
@@ -471,6 +496,7 @@ onBeforeUnmount(() => {
         <span class="bn-c">{{ c.endedAt === null ? 'live' : formatClock(c.startedAt) }}</span>
         <div class="bn-decode">
           {{ formatHz(c.hz, 5) }}<template v-if="c.source"> from unit {{ c.source }}</template>
+          <span v-if="c.category" class="tr-cat" :style="{ color: CATEGORY_COLOR[c.category] }">{{ c.category }}</span>
           <template v-if="!isDemo">
             <span v-if="hearing?.id === c.id" class="tr-on"> hearing now</span>
             <span v-else-if="blocked(c)"> {{ blocked(c) }}</span>
@@ -484,6 +510,10 @@ onBeforeUnmount(() => {
               {{ pinned === c.talkgroup ? 'pinned' : 'hear first' }}
             </button>
           </template>
+          <div v-if="c.codes?.length" class="tr-codes">
+            <span v-for="h in c.codes" :key="h.code">{{ h.code }} {{ h.meaning }}</span>
+          </div>
+          <div v-if="c.transcript" class="tr-tx">"{{ c.transcript }}"</div>
         </div>
       </div>
       <div v-if="!filtered.length" class="bn-row">

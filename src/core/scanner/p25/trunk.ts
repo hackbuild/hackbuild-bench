@@ -2,6 +2,7 @@ import { IdenTable, resolveChannel } from './iden'
 import { parseTsbk } from './tsbk'
 import type { Grant, SiteStatus } from './tsbk'
 import type { RadioSystem, TalkgroupEntry } from '../systems'
+import type { CodeCategory, CodeHit } from '../codes'
 
 /**
  * Trunk following at the metadata level.
@@ -30,6 +31,12 @@ export interface TrunkCall {
   encrypted: boolean
   /** Phase 2 voice rides a TDMA channel with AMBE+2, which is not decoded here. */
   phase2: boolean
+  /** What was said on the call, once a clear one has been transcribed. */
+  transcript?: string
+  /** What the call is about, from the codes heard in the transcript. */
+  category?: CodeCategory
+  /** The codes found, strongest first. */
+  codes?: CodeHit[]
   startedAt: number
   endedAt: number | null
 }

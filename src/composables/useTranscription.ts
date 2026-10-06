@@ -100,6 +100,11 @@ export function useTranscription(deviceId: string) {
     lines.value = []
   }
 
+  /** Transcribe one whole clip, such as a radio call, off the streaming path. */
+  async function transcribeClip(samples: Float32Array, sampleRate: number): Promise<string> {
+    return (await engine.value?.transcribeClip(samples, sampleRate)) ?? ''
+  }
+
   onBeforeUnmount(() => {
     stopStream()
     engine.value?.stop()
@@ -120,5 +125,6 @@ export function useTranscription(deviceId: string) {
     enable,
     disable,
     clear,
+    transcribeClip,
   }
 }

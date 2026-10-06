@@ -47,7 +47,7 @@ Everything is pushed and live. The recent code changes:
   page opened before a deploy asks for files that are gone
 - `a787aed` the scanner and trunking rework, then channel acquisition
   after it
-- p25 phase 1 voice, after that
+- p25 phase 1 voice, then call transcription and dispatch code tagging
 
 Nothing is uncommitted except `.claude/`, which stays out. The next likely
 asks are a live analog tv test when the Mesa ham repeater is on (see tv
@@ -458,6 +458,37 @@ Clear phase 1 calls now play in the trunked view.
   - Calls outside the window: one radio cannot hold both channels.
   - LDU1 link control, the talker id and talkgroup inside the voice.
   - No air test yet.
+
+### scanner transcription and codes, 2026-10-05
+
+The trunked view now transcribes clear calls and tags them by what they
+are about.
+
+- **Transcription.** `Transcriber.transcribeClip()` runs one whole call
+  through Whisper as a single utterance, queued behind the streaming
+  passes. `useTranscription` exposes it. The voice follower keeps each
+  cleared call's audio and hands the clip to `onEnd`.
+- **Codes.** `src/core/scanner/codes/` reads dispatch codes out of the
+  transcript.
+  - `phoenix.ts` is the Phoenix PD list, word for word from the
+    department's own published sheet (updated 3/17/26), 289 codes, each
+    given one of the bench's categories.
+  - `index.ts` finds codes written ("901", "10-4") or spoken ("nine oh
+    one", "ten four"), handling spoken tens like "twenty nine".
+  - `categories.ts` ranks and colours the categories, officer emergency
+    and violent loudest.
+- **The tab.** A "read codes" toggle sits by "hear calls". A tagged call
+  shows its category, the codes found, and the transcript. The category
+  is the most serious code heard.
+- **Checked.** The parser was run on dispatch phrases: "nine ninety nine"
+  reads officer emergency, "ten twenty nine on the plate" finds the
+  records check, a spoken "459" finds the burglary. The clip handoff was
+  verified in node, a 13.86 s call reaching transcription whole. Whisper
+  itself is the receiver tab's existing model.
+- **Not done.** Only the Phoenix PD book is bundled. Mesa went to plain
+  English in 2025, so its traffic needs no code book, but its talkgroups
+  are encrypted anyway. Whisper on scanner audio is rough, so a missed or
+  wrong code is expected.
 
 ## audit, 2026-10-03
 

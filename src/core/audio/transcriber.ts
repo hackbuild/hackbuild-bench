@@ -202,6 +202,35 @@ export class Transcriber {
     }
   }
 
+  private clips: Promise<unknown> = Promise.resolve()
+
+  /**
+   * Transcribes one whole clip, such as a radio call from key up to let go.
+   * A whole utterance reads better than overlapping windows, and the text
+   * belongs to the clip. Clips run one at a time, after any streaming pass.
+   */
+  transcribeClip(samples: Float32Array, sampleRate: number): Promise<string> {
+    const run = async (): Promise<string> => {
+      if (!this.asr || samples.length === 0) return ''
+      const pcm = sampleRate > 0 && Math.abs(sampleRate - RATE) > 1 ? new Resampler().process(samples, sampleRate / RATE) : samples
+      while (this.busy) await new Promise((r) => setTimeout(r, 50))
+      this.busy = true
+      try {
+        const out = await this.asr(pcm, { chunk_length_s: 30, return_timestamps: false })
+        const text = (out?.text ?? '').trim()
+        return NOISE.test(text) ? '' : text
+      } catch (err) {
+        this.lastError = `transcription failed: ${err instanceof Error ? err.message : String(err)}`
+        return ''
+      } finally {
+        this.busy = false
+      }
+    }
+    const next = this.clips.then(run, run)
+    this.clips = next.catch(() => undefined)
+    return next
+  }
+
   on(event: 'text', fn: (line: TranscriptLine) => void): () => void {
     if (event !== 'text') return () => undefined
     this.listeners.add(fn)
