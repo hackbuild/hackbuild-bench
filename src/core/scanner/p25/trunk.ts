@@ -28,6 +28,8 @@ export interface TrunkCall {
   source?: number
   emergency: boolean
   encrypted: boolean
+  /** Phase 2 voice rides a TDMA channel with AMBE+2, which is not decoded here. */
+  phase2: boolean
   startedAt: number
   endedAt: number | null
 }
@@ -99,6 +101,7 @@ export class TrunkFollower {
       source: grant.source,
       emergency: grant.emergency,
       encrypted: grant.encrypted || tg?.encrypted || false,
+      phase2: resolved.tdma,
       startedAt: Date.now(),
       endedAt: null,
     }

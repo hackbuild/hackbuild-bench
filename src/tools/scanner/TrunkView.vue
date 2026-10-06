@@ -1,11 +1,15 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, ref, shallowRef } from 'vue'
+import { computed, onBeforeUnmount, ref, shallowRef, watch } from 'vue'
 import { HbButton, HbIcon } from '@virgilvox/hackbuild-ui'
 import InstScope from '@/components/instruments/InstScope.vue'
 import { TrunkFollower } from '@/core/scanner/p25/trunk'
 import type { TrunkCall } from '@/core/scanner/p25/trunk'
 import { DemoControlChannel } from '@/core/scanner/p25/demo'
-import { ControlChannelDecoder } from '@/core/scanner/p25/receiver'
+import { P25Receiver } from '@/core/scanner/p25/receiver'
+import { VoiceFollower } from '@/core/scanner/p25/voice'
+import { AudioSink } from '@/core/audio/AudioSink'
+import InstKnob from '@/components/instruments/InstKnob.vue'
+import type { ParamSpec } from '@/core/types'
 import type { P25Stats } from '@/core/scanner/p25/receiver'
 import { bus } from '@/core/bus/DeviceBus'
 import { allSystems } from '@/core/scanner/systems'
@@ -73,12 +77,83 @@ const reachable = computed(() => {
 
 let follower: TrunkFollower | null = null
 let demo: DemoControlChannel | null = null
-let decoder: ControlChannelDecoder | null = null
+let decoder: P25Receiver | null = null
 let unsubscribe: (() => void) | null = null
 let feedTimer: ReturnType<typeof setInterval> | null = null
 let ageTimer: ReturnType<typeof setInterval> | null = null
 let lastSyncs = 0
 let lastSyncAt = 0
+
+// ---------------------------------------------------------------------------
+// voice: a clear phase 1 call inside the window plays while the control
+// channel keeps being read.
+// ---------------------------------------------------------------------------
+
+/** Play calls as they come. */
+const hear = ref(true)
+const hearing = shallowRef<TrunkCall | null>(null)
+/** A talkgroup picked from the list, heard ahead of anything else. */
+const pinned = ref<number | null>(null)
+const VOLUME: ParamSpec = { key: 'volume', label: 'volume', min: 0, max: 100, step: 1, default: 72 }
+const volume = ref(VOLUME.default)
+let sink: AudioSink | null = null
+/** Where the radio's window is centred, so a voice channel's place in it is known. */
+let windowCenter = 0
+let windowRate = 0
+
+const voice = new VoiceFollower(
+  (samples, rate) => {
+    sink?.push(samples, rate)
+    bus.emitAudio(props.deviceId, samples.slice(), rate)
+  },
+  () => {
+    hearing.value = null
+    pickCall()
+  },
+  () => {
+    // the grant said clear but the voice says otherwise, so the call is marked and passed over.
+    const c = hearing.value
+    if (c) c.encrypted = true
+    calls.value = [...calls.value]
+  },
+)
+
+/** Why a call cannot be heard, or an empty string when it can. */
+function blocked(c: TrunkCall): string {
+  if (c.encrypted) return 'encrypted'
+  if (c.phase2) return 'phase 2, whose ambe+2 voice is still under patent and not decoded here'
+  if (!windowRate || Math.abs(c.hz - windowCenter) > windowRate * 0.42) return 'outside the window the radio holds'
+  return ''
+}
+
+/** The call to hear next: the pinned talkgroup first, then the newest that passes the filter. */
+function pickCall(): void {
+  if (!hear.value || voice.active || !running.value || isDemo.value) return
+  const live = calls.value.filter((c) => c.endedAt === null && !blocked(c))
+  const wanted = live.filter((c) => serviceFilter.value === 'all' || c.service === serviceFilter.value)
+  const next = live.find((c) => c.talkgroup === pinned.value) ?? wanted[0]
+  if (!next) return
+  hearing.value = next
+  // the control channel's measured error, scaled to the voice channel's frequency.
+  const errorHz = (lock.value?.offsetHz ?? 0) * (next.hz / (controlHz.value || next.hz))
+  voice.follow(next.hz - windowCenter, errorHz)
+}
+
+function pin(c: TrunkCall): void {
+  pinned.value = pinned.value === c.talkgroup ? null : c.talkgroup
+  if (pinned.value !== null && hearing.value && hearing.value.talkgroup !== pinned.value) voice.end()
+  else pickCall()
+}
+
+function toggleHear(): void {
+  hear.value = !hear.value
+  if (!hear.value) {
+    voice.stop()
+    hearing.value = null
+  } else pickCall()
+}
+
+watch(volume, (v) => sink?.setVolume(v / 100))
 
 const filtered = computed(() => {
   if (serviceFilter.value === 'all') return calls.value
@@ -102,6 +177,8 @@ async function tuneControl(): Promise<void> {
     // a recording cannot retune, so the decoder looks where the channel already is.
     if (!inRecording(controlHz.value)) controlIndex.value = Math.max(0, controlList.value.findIndex(inRecording))
     decoder?.setOffset(controlHz.value - r.centerHz)
+    windowCenter = r.centerHz
+    windowRate = r.rate
     lastSyncAt = Date.now()
     lastSyncs = lock.value?.syncs ?? 0
     return
@@ -110,7 +187,11 @@ async function tuneControl(): Promise<void> {
   decoder?.setOffset(-OFFSET_HZ)
   lastSyncAt = Date.now()
   lastSyncs = lock.value?.syncs ?? 0
-  await devices.configure(props.deviceId, { centerHz: hz + OFFSET_HZ, sampleRate: scanRate() })
+  windowCenter = hz + OFFSET_HZ
+  windowRate = scanRate()
+  voice.stop()
+  hearing.value = null
+  await devices.configure(props.deviceId, { centerHz: windowCenter, sampleRate: windowRate })
 }
 
 /**
@@ -143,6 +224,7 @@ async function start(): Promise<void> {
   follower = new TrunkFollower(sys, {
     onCall: () => {
       calls.value = follower ? [...follower.callLog] : []
+      pickCall()
     },
     onCallEnd: () => {
       calls.value = follower ? [...follower.callLog] : []
@@ -166,10 +248,15 @@ async function start(): Promise<void> {
 
   const t = lease.begin()
   try {
-    decoder = new ControlChannelDecoder((octets) => follower?.feedTsbk(octets))
+    // playback needs the press that started it, so the sink opens first.
+    sink ??= new AudioSink()
+    await sink.resume()
+    sink.setVolume(volume.value / 100)
+    decoder = new P25Receiver({ onTsbk: (octets) => follower?.feedTsbk(octets) })
     unsubscribe = bus.onDeviceArtifact(props.deviceId, (a) => {
       if (a.kind !== 'iq') return
       decoder?.feed(a.samples, a.sampleRate)
+      voice.feed(a.samples, a.sampleRate)
     })
     await tuneControl()
     if (!lease.current(t)) return
@@ -191,6 +278,8 @@ async function stop(): Promise<void> {
   unsubscribe?.()
   unsubscribe = null
   decoder = null
+  voice.stop()
+  hearing.value = null
   lock.value = null
   await lease.release()
 }
@@ -222,6 +311,8 @@ const SERVICES = ['all', 'fire', 'law', 'ems', 'interop']
 
 onBeforeUnmount(() => {
   void stop()
+  void sink?.close()
+  sink = null
 })
 </script>
 
@@ -332,14 +423,23 @@ onBeforeUnmount(() => {
       </div>
     </div>
 
-    <div v-if="!isDemo && running" class="bn-banner is-warn tr-reads">
-      <HbIcon name="warning" />
-      <span>
-        the control channel is decoded here, so grants and talkgroups are real. the voice
-        is not: phase 1 voice is imbe and phase 2 voice is ambe, and this build has neither
-        vocoder. op25 and sdrtrunk decode the voice.
-      </span>
+    <div v-if="!isDemo" class="bn-knobs tr-voice">
+      <button type="button" class="bn-pack" :class="{ 'is-on': hear }" :aria-pressed="hear" @click="toggleHear">
+        hear calls
+      </button>
+      <InstKnob v-model="volume" :spec="VOLUME" />
+      <div class="tr-hearing" role="status">
+        <template v-if="hearing">
+          hearing {{ hearing.name }} on {{ formatHz(hearing.hz, 5) }}
+        </template>
+        <template v-else-if="running && hear">waiting for a clear phase 1 call inside the window</template>
+      </div>
     </div>
+    <p v-if="!isDemo" class="bn-note tr-tight">
+      clear phase 1 calls inside the radio's window play here, read by an imbe vocoder. phase 2
+      calls use ambe+2, which is under patent until may 2028, and stay silent, as do encrypted
+      ones. pick a talkgroup below to hear it first.
+    </p>
 
     <div class="bn-subhead" style="margin-top: 14px">
       talkgroup activity
@@ -371,6 +471,19 @@ onBeforeUnmount(() => {
         <span class="bn-c">{{ c.endedAt === null ? 'live' : formatClock(c.startedAt) }}</span>
         <div class="bn-decode">
           {{ formatHz(c.hz, 5) }}<template v-if="c.source"> from unit {{ c.source }}</template>
+          <template v-if="!isDemo">
+            <span v-if="hearing?.id === c.id" class="tr-on"> hearing now</span>
+            <span v-else-if="blocked(c)"> {{ blocked(c) }}</span>
+            <button
+              v-if="!blocked(c)"
+              type="button"
+              class="bn-tinyact tr-pin"
+              :aria-pressed="pinned === c.talkgroup"
+              @click="pin(c)"
+            >
+              {{ pinned === c.talkgroup ? 'pinned' : 'hear first' }}
+            </button>
+          </template>
         </div>
       </div>
       <div v-if="!filtered.length" class="bn-row">
@@ -390,5 +503,22 @@ onBeforeUnmount(() => {
 <style scoped>
 .tr-reads {
   margin-top: var(--hb-s3);
+}
+.tr-voice {
+  align-items: center;
+}
+.tr-hearing {
+  font-family: var(--hb-utility);
+  font-size: 11px;
+  color: var(--hb-ink-2);
+}
+.tr-tight {
+  margin-top: 0;
+}
+.tr-on {
+  font-weight: 700;
+}
+.tr-pin {
+  margin-left: var(--hb-s2);
 }
 </style>

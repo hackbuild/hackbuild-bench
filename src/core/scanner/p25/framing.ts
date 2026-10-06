@@ -195,3 +195,21 @@ export function buildTsdu(nac: number, tsbks: Uint8Array[]): number[] {
   }
   return out
 }
+
+/** The dibits of one voice frame: sync, NID, and an LDU's information dibits with status in place. */
+export function buildLdu(nac: number, duid: number, info: ArrayLike<number>): number[] {
+  const content: number[] = [...SYNC]
+  const nid = ((nac & 0xfff) << 4) | (duid & 0xf)
+  for (let s = 14; s >= 0; s -= 2) content.push((nid >> s) & 3)
+  for (let i = 8; i < NID_DIBITS; i++) content.push(0)
+  for (let i = 0; i < info.length; i++) content.push(info[i])
+  const out: number[] = []
+  let c = 0
+  while (c < content.length) {
+    if (isStatusDibit(out.length)) out.push(2)
+    else out.push(content[c++])
+  }
+  // the frame closes on a status dibit.
+  out.push(2)
+  return out
+}

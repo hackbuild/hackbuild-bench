@@ -1,5 +1,6 @@
 /**
- * P25 phase 1 control channel receiver: IQ in, TSBK octets out.
+ * P25 phase 1 receiver: IQ in, TSBK octets out of a control channel, or
+ * LDU voice frames out of a voice channel.
  *
  * A channel filter pulls the 12.5 kHz control channel out of the window.
  * Each symbol is then read as the change of phase across it, which is what
@@ -12,12 +13,14 @@
  * level steers out any frequency error, and the framer hunts the frame sync
  * in either polarity, reads the NID, and decodes each TSBK of a TSDU.
  *
- * Voice is out of reach: LDU frames carry IMBE, and phase 2 voice is TDMA
- * with AMBE, and this build has neither vocoder.
+ * On a voice channel the framer hands over each LDU's information dibits
+ * for `imbe/` to turn into speech. Phase 2 voice is TDMA with AMBE+2, which
+ * is still under patent and is not read here.
  */
 
 import { ChannelFilter } from '@/core/dsp/channel'
 import { Fft } from '@/core/dsp/fft'
+import { LDU_DIBITS } from './imbe/ldu'
 import {
   DUID,
   MAX_TSBKS,
@@ -53,6 +56,11 @@ const ACQ_FRAMES = 6
 const SIGNAL_WIDTH_HZ = 8_000
 /** A lump this far over the floor counts as a signal. */
 const ACQ_MIN_DB = 4
+/** Symbols between timing checks. Clocks drift by far less than a sample in this many. */
+const TIMING_EVERY = 240
+/** Timing shifts tried at each check, across one symbol. */
+const TIMING_STEPS = 16
+
 /** Symbols without a new frame sync before the channel is looked for again. */
 const REACQUIRE_SYMBOLS = SYMBOL_RATE * 4
 
@@ -79,6 +87,38 @@ export interface P25Stats {
   signalDb: number
 }
 
+export type P25Mode = 'control' | 'voice'
+
+export interface P25Handlers {
+  /** A TSBK that passed its crc, on a control channel. */
+  onTsbk?: (octets: Uint8Array) => void
+  /** An LDU1 or LDU2's information dibits, on a voice channel. */
+  onLdu?: (duid: number, dibits: number[]) => void
+  /** A terminator: the talker let go. */
+  onEnd?: () => void
+}
+
+const VALID_DUIDS = [DUID.HDU, DUID.TDU, DUID.LDU1, DUID.TSDU, DUID.LDU2, DUID.PDU, DUID.TDULC]
+
+/** The valid duid nearest a received one, since the nid's own correction is not read. */
+function nearestDuid(raw: number): number {
+  let best: number = raw
+  let bestBits = 5
+  for (const d of VALID_DUIDS) {
+    let x = d ^ raw
+    let bits = 0
+    while (x) {
+      bits += x & 1
+      x >>= 1
+    }
+    if (bits < bestBits) {
+      bestBits = bits
+      best = d
+    }
+  }
+  return best
+}
+
 /** Reads frames out of a stream of dibits. */
 class Framer {
   private dibits: number[] = []
@@ -87,11 +127,14 @@ class Framer {
   private inUnit = false
   private blocksLeft = 0
   private firstBlock = false
+  /** Inside a voice frame, waiting for this duid's dibits. */
+  private ldu: number | null = null
   private invert = false
 
   constructor(
     private readonly stats: P25Stats,
-    private readonly onTsbk: (octets: Uint8Array) => void,
+    private readonly mode: P25Mode,
+    private readonly handlers: P25Handlers,
   ) {}
 
   reset(): void {
@@ -99,6 +142,7 @@ class Framer {
     this.framePos = 0
     this.inUnit = false
     this.blocksLeft = 0
+    this.ldu = null
   }
 
   push(dibit: number): void {
@@ -117,9 +161,18 @@ class Framer {
    */
   private hunt(): void {
     const d = this.dibits
+    if (this.ldu !== null) {
+      const body = this.takeInfo(LDU_DIBITS)
+      if (!body) return
+      const duid = this.ldu
+      this.ldu = null
+      this.stats.good++
+      this.handlers.onLdu?.(duid, body)
+      return
+    }
     if (this.inUnit) {
       while (this.blocksLeft > 0) {
-        const block = this.takeBlock()
+        const block = this.takeInfo(TSBK_DIBITS)
         if (!block) break
         const octets = trellisHalfDecode(block)
         this.blocksLeft--
@@ -128,7 +181,7 @@ class Framer {
         this.firstBlock = false
         if (tsbkCrcOk(octets)) {
           this.stats.good++
-          this.onTsbk(octets)
+          this.handlers.onTsbk?.(octets)
         } else if (first) {
           // the unit was taken on trust, and its first block says it was not a tsdu.
           this.blocksLeft = 0
@@ -173,6 +226,14 @@ class Framer {
 
     d.splice(0, start + UNIT_HEAD_DIBITS)
     this.framePos = UNIT_HEAD_DIBITS
+    if (this.mode === 'voice') {
+      const unit = nearestDuid(duid)
+      if (unit === DUID.LDU1 || unit === DUID.LDU2) {
+        this.ldu = unit
+        this.hunt()
+      } else if (unit === DUID.TDU || unit === DUID.TDULC) this.handlers.onEnd?.()
+      return
+    }
     // the duid has no error correction here, and one wrong symbol turns a
     // tsdu into something else. a control channel sends little but tsdus, so
     // anything but a data packet is read as one and dropped if its first
@@ -185,12 +246,12 @@ class Framer {
     }
   }
 
-  /** The next 98 information dibits, skipping status positions, or null if not all here yet. */
-  private takeBlock(): number[] | null {
+  /** The next information dibits, skipping status positions, or null if not all here yet. */
+  private takeInfo(count: number): number[] | null {
     const d = this.dibits
     const block: number[] = []
     let taken = 0
-    while (block.length < TSBK_DIBITS) {
+    while (block.length < count) {
       if (taken >= d.length) return null
       if (!isStatusDibit(this.framePos + taken)) block.push(d[taken])
       taken++
@@ -208,10 +269,10 @@ function mismatches(d: number[], at: number, pattern: number[]): number {
 }
 
 /**
- * The whole path from a radio's IQ to TSBKs. Feed it the window as it comes,
- * and tell it where in the window the control channel sits.
+ * The whole path from a radio's IQ to frames. Feed it the window as it
+ * comes, and tell it where in the window the channel sits.
  */
-export class ControlChannelDecoder {
+export class P25Receiver {
   private filter: ChannelFilter | null = null
   private inputRate = 0
   private offset = 0
@@ -229,6 +290,8 @@ export class ControlChannelDecoder {
   private found = 0
   private syncsAtCheck = 0
   private symbolsAtCheck = 0
+  /** The radio's error, when given, so no search is needed. */
+  private known: number | null = null
 
   // the unwrapped phase of the channel, one entry per channel sample.
   private phase: number[] = []
@@ -239,8 +302,16 @@ export class ControlChannelDecoder {
   private bias = 0
   /** Where the next symbol is read, in channel samples into `phase`. */
   private t = 0
-  private yPrev = 0
+  /** Where each recent symbol was read, for the timing check. */
+  private recent: number[] = []
+  /** Share of recent symbols that sat on a level at the last timing check, 0 to 1. */
+  private eye = 0
   private errAcc = 1
+  /**
+   * Mean size of a symbol's turn, in level units. Balanced symbols average
+   * 2, so the ratio corrects a transmitter whose deviation is off standard.
+   */
+  private spread = 2
 
   private readonly stats: P25Stats = {
     symbols: 0,
@@ -256,14 +327,20 @@ export class ControlChannelDecoder {
   }
   private readonly framer: Framer
 
-  constructor(onTsbk: (octets: Uint8Array) => void) {
-    this.framer = new Framer(this.stats, onTsbk)
+  constructor(handlers: P25Handlers, mode: P25Mode = 'control') {
+    this.framer = new Framer(this.stats, mode, handlers)
   }
 
-  /** Where the control channel sits inside the window, in Hz from its centre. */
-  setOffset(hz: number): void {
-    if (hz === this.offset && this.filter) return
+  /**
+   * Where the channel sits inside the window, in Hz from its centre. With
+   * `errorHz`, the radio's error already measured elsewhere, the channel is
+   * read there at once rather than looked for, which a voice channel that
+   * is quiet between calls needs.
+   */
+  setOffset(hz: number, errorHz?: number): void {
+    if (hz === this.offset && (this.filter || this.wide) && errorHz === undefined) return
     this.offset = hz
+    this.known = errorHz ?? null
     this.rebuild()
   }
 
@@ -279,6 +356,11 @@ export class ControlChannelDecoder {
   /** Starts looking for the channel around the listed frequency. */
   private rebuild(): void {
     if (!this.inputRate) return
+    if (this.known !== null) {
+      this.found = Math.round(this.known)
+      this.lock()
+      return
+    }
     this.wide = new ChannelFilter(this.offset, this.inputRate, ACQ_HALF_HZ, CHANNEL_RATE)
     this.filter = null
     this.acqFill = 0
@@ -296,6 +378,9 @@ export class ControlChannelDecoder {
     this.acc = 0
     this.bias = 0
     this.t = 2 * this.sps
+    this.recent.length = 0
+    this.eye = 0
+    this.spread = 2
     this.framer.reset()
     this.wide = null
     this.stats.stage = 'decode'
@@ -369,6 +454,34 @@ export class ControlChannelDecoder {
     this.symbols()
   }
 
+  /**
+   * Finds the reading point with the cleanest eye over the recent symbols
+   * and moves the clock to it. A search holds where a tracking loop is
+   * pulled off by the smearing real transmitters and simulcast add.
+   */
+  private retime(): void {
+    const sps = this.sps
+    let best = -1
+    let bestShift = 0
+    for (let k = 0; k < TIMING_STEPS; k++) {
+      const shift = ((k / TIMING_STEPS) - 0.5) * sps
+      let fit = 0
+      for (const t of this.recent) {
+        const y = this.level(t + shift)
+        const n = y > 2 ? 3 : y > 0 ? 1 : y > -2 ? -1 : -3
+        fit += Math.max(0, 1 - Math.abs(y - n))
+      }
+      if (fit > best) {
+        best = fit
+        bestShift = shift
+      }
+    }
+    this.eye = best / this.recent.length
+    // half the way at a time, so one noisy stretch cannot throw the clock.
+    this.t += bestShift / 2
+    this.recent.length = 0
+  }
+
   /** Phase at a fractional sample position. */
   private at(pos: number): number {
     const k = Math.floor(pos)
@@ -380,35 +493,37 @@ export class ControlChannelDecoder {
 
   /** The level a symbol ending at pos carried, from the phase it turned through. */
   private level(pos: number): number {
-    return (this.at(pos) - this.at(pos - this.sps)) / QUARTER_PI
+    return ((this.at(pos) - this.at(pos - this.sps)) / QUARTER_PI) * (2 / this.spread)
   }
 
   private symbols(): void {
     const sps = this.sps
     while (this.t + 1 < this.phase.length) {
       const y = this.level(this.t)
-      const mid = this.level(this.t - sps / 2)
-      // gardner: the half way reading sits on zero when the clock is on the eye.
-      const err = Math.max(-1, Math.min(1, ((this.yPrev - y) * mid) / 18))
-      this.yPrev = y
+      // the spread is measured on the scaled level, so it settles where the levels average 2.
+      this.spread = Math.max(0.5, Math.min(8, this.spread * (1 + 0.0005 * (Math.abs(y) / 2 - 1))))
+      this.recent.push(this.t)
 
       const dibit = dibitOf(y)
       const ideal = dibit === 1 ? 3 : dibit === 0 ? 1 : dibit === 2 ? -1 : -3
       const r = y - ideal
-      // a carrier off frequency adds the same turn to every symbol, and the
-      // symbols themselves average to none. steering on the average rather
-      // than on the sliced residual holds even when the offset is large
-      // enough to slice every symbol wrong.
-      this.bias += 0.004 * ((y * QUARTER_PI) / sps)
+      // a carrier off frequency adds the same turn to every symbol. with the
+      // eye open each symbol's distance from its level measures it. until
+      // then only the average can, and real data is too unbalanced for the
+      // average to be trusted quickly, so that pull is slow.
+      const pull = this.eye > 0.6 ? 0.001 * r : 0.001 * y
+      const limit = (2 * Math.PI * CHANNEL_HALF_HZ) / this.channelRate() / 2
+      this.bias = Math.max(-limit, Math.min(limit, this.bias + (pull * QUARTER_PI) / sps))
       this.errAcc += 0.002 * (Math.min(1, Math.abs(r)) - this.errAcc)
       this.stats.errorRate = this.errAcc
       this.stats.symbols++
       this.framer.push(dibit)
 
-      this.t += sps + 0.08 * err * sps
+      this.t += sps
+      if (this.recent.length >= TIMING_EVERY) this.retime()
     }
     // no frame for a while means the lock was on the wrong thing, or the channel moved.
-    if (this.stats.symbols - this.symbolsAtCheck > REACQUIRE_SYMBOLS) {
+    if (this.known === null && this.stats.symbols - this.symbolsAtCheck > REACQUIRE_SYMBOLS) {
       if (this.stats.syncs === this.syncsAtCheck) {
         this.rebuild()
         return
@@ -416,8 +531,8 @@ export class ControlChannelDecoder {
       this.syncsAtCheck = this.stats.syncs
       this.symbolsAtCheck = this.stats.symbols
     }
-    // keep a few symbols of history behind the clock.
-    const keep = Math.floor(this.t - 3 * sps)
+    // keep the symbols the timing check reads behind the clock.
+    const keep = Math.floor(this.t - (TIMING_EVERY + 4) * sps)
     if (keep > 4096) {
       this.phase.splice(0, keep)
       this.t -= keep

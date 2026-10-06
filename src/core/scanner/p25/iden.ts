@@ -92,6 +92,8 @@ export interface ResolvedChannel {
   hz: number
   /** Which TDMA slot, or 0 for FDMA. */
   slot: number
+  /** A two slot TDMA channel, which carries phase 2 voice. */
+  tdma: boolean
 }
 
 /**
@@ -111,11 +113,11 @@ export function resolveChannel(table: IdenTable, channel: number): ResolvedChann
     const carrier = Math.floor(chan / 2)
     const slot = chan % 2
     const hz = entry.baseHz + carrier * entry.spacingHz
-    return sane(hz) ? { hz, slot } : null
+    return sane(hz) ? { hz, slot, tdma: true } : null
   }
 
   const hz = entry.baseHz + chan * entry.spacingHz
-  return sane(hz) ? { hz, slot: 0 } : null
+  return sane(hz) ? { hz, slot: 0, tdma: false } : null
 }
 
 function sane(hz: number): boolean {

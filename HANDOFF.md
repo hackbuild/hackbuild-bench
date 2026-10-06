@@ -47,6 +47,7 @@ Everything is pushed and live. The recent code changes:
   page opened before a deploy asks for files that are gone
 - `a787aed` the scanner and trunking rework, then channel acquisition
   after it
+- p25 phase 1 voice, after that
 
 Nothing is uncommitted except `.claude/`, which stays out. The next likely
 asks are a live analog tv test when the Mesa ham repeater is on (see tv
@@ -395,6 +396,69 @@ Both modes of the scanner tab were broken on hardware.
   time. The RWC control frequencies bundled match what RadioReference
   users list.
 
+### p25 voice, 2026-10-05
+
+Clear phase 1 calls now play in the trunked view.
+
+- **Vocoder.** `src/core/scanner/p25/imbe/` holds two files.
+  - `vocoder.ts` ports mbelib's IMBE 7200x4400: Golay and Hamming
+    correction, the descrambler, parameter decoding and synthesis.
+  - `tables.ts` holds mbelib's tables, converted by a script.
+
+  The IMBE patents have expired. mbelib is ISC.
+- **Frames.** `imbe/ldu.ts` holds three things:
+  - where the nine IMBE frames sit in an LDU, with DSD's interleave
+    tables, which are ISC
+  - `ldu2Algid`, the encryption algorithm, where 0x80 is clear
+  - the receiver's voice mode, which hands each LDU over
+- **Following.** `voice.ts` reads one voice channel inside the window the
+  radio already holds, so the control channel stays decoded.
+  - The control channel's measured error is passed on, so the voice
+    channel is read at once.
+  - A terminator, or 1.5 s without a frame, ends the call.
+  - Two LDU2s in a row naming another algorithm mark the call encrypted
+    and mute it.
+  - The view hears the pinned talkgroup first, then the newest live call
+    that passes the service filter.
+  - It names why a call stays silent: encrypted, phase 2, or outside the
+    window.
+  - Audio goes to the sink and on the bus, so the transcriber and the
+    session recorder have it.
+- **Receiver changes found on real recordings.** The sigidwiki P25
+  recordings are demodulated audio, so the tests put them back on a
+  carrier:
+  - C4FM and CQPSK, each as control channel and voice channel
+  - the C4FM control channel is WACN BEE00, system 14C, read correctly
+
+  They showed two faults:
+  - Steering frequency on the average symbol wandered by kilohertz on
+    real, unbalanced data. It now steers on each symbol's distance from
+    its level once the eye is open, and on the average, slowly, before.
+  - The Gardner loop gave way to a search: every 240 symbols it moves to
+    the timing with the cleanest eye.
+
+  Results: the C4FM control recording went from 97 to 2151 good blocks
+  with none bad, and CQPSK control from 39 to 1431. All 1188 IMBE frames
+  of the three voice recordings decode with zero bits corrected, and
+  every LDU2 reads algid 0x80. The synthetic suite still decodes 147 to
+  158 of 180 in every case.
+- **Checked against mbelib.** Built natively with a seeded rand. Pitch
+  and harmonic count match on all 1188 frames, and the audio is within
+  -52 to -61 dB, the gap of doubles against floats.
+  - A read one past the end of the harmonic arrays is zero in C, since it
+    lands on the next struct field. Here it was undefined and turned the
+    audio to NaN. The arrays carry a zero past the end.
+- **In the browser.** A synthetic recording held a control channel
+  granting talkgroup 1795 and an LSM voice channel carrying the real
+  recording's frames. The view showed "hearing phoenix fire k1 alarm" and
+  put 5.6 s of audio on the bus.
+- **Not done.**
+  - Phase 2: TDMA and AMBE+2. AMBE+2 is under patent until 2028-05-20,
+    US 8,359,197, and shipping it is the owner's call.
+  - Calls outside the window: one radio cannot hold both channels.
+  - LDU1 link control, the talker id and talkgroup inside the voice.
+  - No air test yet.
+
 ## audit, 2026-10-03
 
 Before this deploy, three reviews ran in parallel over the uncommitted work:
@@ -630,6 +694,9 @@ Written from the standards after reading the reference code:
 - Meteor LRPT, after SatDump (GPL-3.0), with the MIT meteor_demod and
   lrpt-encoder used as references
 - AIS and RS41
+- the IMBE vocoder, a port of mbelib, and the voice frame tables, from DSD,
+  both ISC licensed. Their notices are in the file headers. AMBE+2 is not
+  included.
 - the tv pilot finder, from ATSC A/53, and the analog picture, from the
   NTSC timing standard. Neither follows any one program's code.
 

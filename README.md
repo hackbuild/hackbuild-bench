@@ -60,6 +60,7 @@ Decoders run on any radio that streams iq, and on recordings:
 | alerts | NOAA Weather Radio SAME headers, with the audio | 162.400 to 162.550 MHz |
 | weather sat | Meteor-M LRPT images, and NOAA APT from archived recordings | 137.1 and 137.9 MHz |
 | tune | FM station name, PI and call sign, radiotext and clock over RDS | FM broadcast |
+| scanner, trunked | P25 phase 1 control channels: talkgroup grants, names and frequencies, and the voice of clear phase 1 calls inside the radio's window, through an IMBE vocoder. Phase 2 calls are AMBE+2, under patent until May 2028, and stay silent. | wherever the system's control channel sits |
 | tv | which ATSC stations are on air, by pilot, with a meter for aiming an antenna and a crystal check. Not the picture: a channel is 6 MHz wide. | US tv channels 2 to 36 |
 | tv, analog picture | analog NTSC tv in black and white, and its sound by retuning, such as ham tv repeaters | 421.25, 1253.25 MHz and the like |
 
