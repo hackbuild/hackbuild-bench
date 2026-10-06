@@ -8,6 +8,8 @@ type EventListener = (e: BusEvent) => void
 
 interface Live {
   node: DeviceNode
+  /** The handle it was attached from, to match a usb disconnect to its node. */
+  handle: DeviceHandle
   /** Null between attach() inserting the entry and driver.open() returning. */
   session: DeviceSession | null
   driver: DeviceDriver
@@ -39,6 +41,26 @@ export class DeviceBus {
   private deviceSubs = new Map<string, Set<ArtifactListener>>()
   private counter = 0
   private healthTimer: ReturnType<typeof setInterval> | null = null
+  private usbWatching = false
+
+  /**
+   * Detaches a device the browser says was unplugged, so a lost radio reads
+   * as gone rather than as a raw transfer error on the next control write.
+   */
+  private watchUsb(): void {
+    if (this.usbWatching || typeof navigator === 'undefined' || !navigator.usb) return
+    this.usbWatching = true
+    navigator.usb.addEventListener('disconnect', (ev) => {
+      const device = (ev as USBConnectionEvent).device
+      for (const [id, entry] of this.live) {
+        const raw = entry.handle.raw as { device?: USBDevice } | undefined
+        if (raw && raw.device === device) {
+          this.fire({ type: 'log', deviceId: id, message: 'the radio was unplugged', at: Date.now() })
+          void this.detach(id).catch(() => undefined)
+        }
+      }
+    })
+  }
 
   registerDriver(driver: DeviceDriver): void {
     this.drivers.set(driver.descriptor.kind, driver)
@@ -134,8 +156,9 @@ export class DeviceBus {
       connectedAt: Date.now(),
     }
 
-    const entry: Live = { node, session: null, driver, abort, seq: 0, configuring: Promise.resolve() }
+    const entry: Live = { node, handle, session: null, driver, abort, seq: 0, configuring: Promise.resolve() }
     this.live.set(id, entry)
+    this.watchUsb()
     this.fire({ type: 'attached', deviceId: id, at: Date.now() })
 
     const ctx: DriverContext = {
@@ -189,7 +212,7 @@ export class DeviceBus {
     } catch (err) {
       if (!this.live.has(id)) throw err
       node.status = 'error'
-      node.error = err instanceof Error ? err.message : String(err)
+      node.error = friendlyError(err)
       this.fire({ type: 'error', deviceId: id, message: node.error, at: Date.now() })
       throw err
     }
@@ -267,7 +290,7 @@ export class DeviceBus {
       entry.node.error = undefined
     } catch (err) {
       entry.node.status = 'error'
-      entry.node.error = err instanceof Error ? err.message : String(err)
+      entry.node.error = friendlyError(err)
       this.fire({ type: 'error', deviceId: id, message: entry.node.error, at: Date.now() })
       throw err
     }
@@ -279,7 +302,7 @@ export class DeviceBus {
       await entry.session.stop()
     } catch (err) {
       entry.node.status = 'error'
-      entry.node.error = err instanceof Error ? err.message : String(err)
+      entry.node.error = friendlyError(err)
       this.fire({ type: 'error', deviceId: id, message: entry.node.error, at: Date.now() })
       throw err
     }
@@ -440,3 +463,16 @@ export class DeviceBus {
 }
 
 export const bus = new DeviceBus()
+
+/**
+ * A plain message for the errors a radio throws when it goes away, so a
+ * yanked usb cable or a power glitch reads as what it is rather than as a
+ * transfer failure. Other errors pass through unchanged.
+ */
+function friendlyError(err: unknown): string {
+  const raw = err instanceof Error ? err.message : String(err)
+  if (/disconnect|no device selected|device was lost|transfer(in|out)|the device was/i.test(raw)) {
+    return 'the radio was unplugged or lost power. plug it back in and connect again.'
+  }
+  return raw
+}

@@ -543,6 +543,18 @@ dispatch codes.
   the talkgroup, the category and the text, newest first, saveable as a
   text file. It fills while read codes is on.
 
+### usb disconnect handling, 2026-10-05
+
+A radio unplugged or power-glitched mid-stream used to surface a raw
+`controlTransferOut ... device was disconnected` and wedge the node in
+error. The bus now listens for `navigator.usb` `disconnect`, matches the
+device to its node by the handle's raw usb device, and detaches it with a
+"the radio was unplugged" log, so it leaves the rail cleanly. Any error
+that still reaches a node is passed through `friendlyError`, which turns
+the usb disconnect and lost-device messages into plain words and leaves
+other errors alone. The onnxruntime and hub.js lines in the console are
+the whisper loader's own noise and are harmless.
+
 ## audit, 2026-10-03
 
 Before this deploy, three reviews ran in parallel over the uncommitted work:
