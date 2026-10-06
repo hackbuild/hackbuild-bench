@@ -555,6 +555,31 @@ the usb disconnect and lost-device messages into plain words and leaves
 other errors alone. The onnxruntime and hub.js lines in the console are
 the whisper loader's own noise and are harmless.
 
+### nav: vor and ils, 2026-10-05
+
+The first build off the signals research. A nav tab (`src/tools/nav`,
+`src/core/decode/navaid`) reads aviation navigation beacons off the
+AM-airband path.
+
+- **VOR** (108 to 118 MHz): after AM detection the decoder reads the 30 Hz
+  variable tone from the envelope and the 30 Hz reference from the FM'd
+  9960 Hz subcarrier, and their phase difference is the radial. Shown as a
+  needle on the radar and a radial/reciprocal readout.
+- **ILS** localizer and glideslope: the 90 and 150 Hz tone depths give the
+  DDM, drawn as a left/right course needle.
+- **Ident:** a 1020 Hz tone keyed into morse, decoded best effort; a noisy
+  ident stays blank rather than showing garbage.
+- **Calibration:** the decoder takes out a fixed 172.7 degree processing
+  bias so a radial reads true, and a trim slider nulls the cvor/dvor sense
+  and any field residual.
+- **Checked:** synthetic VOR radials 0 to 315 read back exactly after
+  calibration, and ILS DDM of 0 and +-0.155 read within 0.001. Verified in
+  the browser demo for both vor and ils, desktop and 390 px. Not yet run on
+  a real beacon.
+- **Why this one first:** the research ranked vor/ils and vdl2 as the top
+  tier-1 adds that reuse shipped dsp. vdl2 (aircraft data) is the next
+  build.
+
 ## audit, 2026-10-03
 
 Before this deploy, three reviews ran in parallel over the uncommitted work:
@@ -817,7 +842,7 @@ is open and belongs to the owner.
 - the stepped sweep was exercised in demo mode only
 - no offset tuning for the zero if tuners, so an E4000 or FC stick shows the
   demod's dc remainder at the centre. librtlsdr leaves it off by default too.
-- an rtl-sdr carries thirteen tabs in easy mode and seventeen in
+- an rtl-sdr carries fourteen tabs in easy mode and eighteen in
   advanced, which wrap to several rows at 390 px. Grouping the decoders
   under one tab is open.
 - `.claude/worktrees/` holds the agent worktrees the decoders were built in.

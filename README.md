@@ -63,6 +63,7 @@ Decoders run on any radio that streams iq, and on recordings:
 | scanner, trunked | P25 phase 1: pick your state and system, or add a control channel; talkgroup grants and frequencies; the voice of clear calls and of calls you hold the key for (keys stay in the browser); a timestamped transcript log tagged with dispatch codes; save calls to wav. Phase 2 and calls with no loaded key stay silent. | the system's control channel |
 | tv | which ATSC stations are on air, by pilot, with a meter for aiming an antenna and a crystal check. Not the picture: a channel is 6 MHz wide. | US tv channels 2 to 36 |
 | tv, analog picture | analog NTSC tv in black and white, and its sound by retuning, such as ham tv repeaters | 421.25, 1253.25 MHz and the like |
+| nav | VOR radial and ILS course-deviation navigation beacons, with the morse ident | 108 to 118 MHz |
 
 The spectrum tab measures as well as draws. It has:
 

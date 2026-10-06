@@ -171,6 +171,15 @@ const TOOLS: ToolManifest[] = [
     order: 33.5,
   },
   {
+    id: 'nav',
+    label: 'nav',
+    icon: 'location-crosshairs',
+    scope: 'device',
+    requires: [CAPABILITIES.CAPTURE_IQ],
+    component: lazyTool(() => import('./nav/NavPanel.vue')),
+    order: 36.5,
+  },
+  {
     id: 'tv',
     label: 'tv',
     icon: 'display',
